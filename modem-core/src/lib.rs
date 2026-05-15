@@ -3,5 +3,6 @@
 pub mod crc;
 pub mod frame;
 pub mod fsk;
+pub mod phy;
 pub mod preamble;
 pub mod rs;
