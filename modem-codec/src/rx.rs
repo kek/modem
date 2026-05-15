@@ -109,6 +109,10 @@ impl<P: Phy> Receiver<P> {
 
                 match decode_frame(frame_part) {
                     Ok((header, payload)) => {
+                        if header.first {
+                            self.assembled.clear();
+                            self.seq = 0;
+                        }
                         self.assembled.extend_from_slice(&payload);
                         events.push(FrameEvent::FrameOk { seq: self.seq, bytes: payload });
                         if header.last {
@@ -181,6 +185,33 @@ mod tests {
         }).expect("no StreamComplete event");
         assert!(complete.1);
         assert_eq!(complete.0, payload);
+    }
+
+    #[test]
+    fn back_to_back_transmissions_decode_cleanly() {
+        let tx = Transmitter::new(FskPhy::audible(), false);
+        let mut rx = Receiver::new(FskPhy::audible());
+
+        // Multi-frame first transmission: feed all frames except the last.
+        // The receiver will collect ok frames into `assembled` but never see
+        // StreamComplete, leaving stale bytes that, without the fix, get
+        // prepended to the next transmission.
+        let big: Vec<u8> = (0..500).map(|i| (i & 0xFF) as u8).collect();
+        let samples = tx.encode(&big);
+        // 500 bytes + 32 sha = 532 bytes → 3 frames. Drop the final frame.
+        // Each frame occupies the same number of samples in the audio stream.
+        let per_frame = samples.len() / 3;
+        let _ = rx.push_samples(&samples[..per_frame * 2]);
+        // Silence between transmissions so the receiver settles.
+        let _ = rx.push_samples(&vec![0f32; 48_000]);
+
+        let good = tx.encode(b"second message");
+        let events = rx.push_samples(&good);
+        let complete = events.iter().find_map(|e| match e {
+            FrameEvent::StreamComplete { bytes, sha256_ok: true } => Some(bytes.clone()),
+            _ => None,
+        });
+        assert_eq!(complete.as_deref(), Some(&b"second message"[..]));
     }
 
     #[test]
