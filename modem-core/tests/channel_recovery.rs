@@ -41,18 +41,13 @@ fn single_dropout_recovers_via_rs() {
     let p = payload();
     let frame = encode_frame(header_of(p.len()), &p).unwrap();
     let mut samples = phy.modulate_bytes(&frame);
-    // 200 ms cough in the middle = 9600 samples zeroed.
-    let mid = samples.len() / 2;
-    drop_window(&mut samples, mid, 9600);
+    // 100 ms dropout aligned to symbol boundary (10 symbols ≈ <4 bytes)
+    let symbol_samples = modem_core::fsk::FskConfig::audible().symbol_samples;
+    let start = 100 * symbol_samples; // ~1s into the frame
+    drop_window(&mut samples, start, 10 * symbol_samples);
     let back = phy.demodulate_bytes(&samples, FRAME_LEN);
-    // RS may or may not recover depending on which byte positions were hit;
-    // ensure at least decoding doesn't panic, and assert recovery when fewer
-    // than 16 bytes were corrupted.
-    if let Ok((_, decoded)) = decode_frame(&back) {
-        assert_eq!(decoded, p);
-    }
-    // If decode fails, that's also acceptable for a 9600-sample dropout —
-    // documents the realistic threshold. The codec layer will retry by re-syncing.
+    let (_, decoded) = decode_frame(&back).expect("100ms dropout must recover via RS");
+    assert_eq!(decoded, p);
 }
 
 #[test]
