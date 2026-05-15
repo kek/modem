@@ -2,6 +2,7 @@ mod cmd_rx_wav;
 mod cmd_send;
 mod cmd_recv;
 mod cmd_tx_wav;
+mod output_format;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;

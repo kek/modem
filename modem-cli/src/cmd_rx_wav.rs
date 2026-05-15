@@ -1,3 +1,4 @@
+use crate::output_format::{is_printable, print_hex};
 use crate::{make_phy, Profile};
 use hound::WavReader;
 use modem_codec::rx::{FrameEvent, Receiver};
@@ -35,18 +36,3 @@ pub fn run(profile: Profile, input: PathBuf, output: Option<PathBuf>, hex: bool)
     Ok(())
 }
 
-fn is_printable(b: &[u8]) -> bool {
-    std::str::from_utf8(b).map_or(false, |s| s.chars().all(|c|
-        !c.is_control() || c == '\t' || c == '\n' || c == '\r'
-    ))
-}
-
-fn print_hex(b: &[u8]) {
-    for (i, chunk) in b.chunks(16).enumerate() {
-        let hex: String = chunk.iter().map(|x| format!("{:02x} ", x)).collect();
-        let ascii: String = chunk.iter()
-            .map(|&x| if x.is_ascii_graphic() || x == b' ' { x as char } else { '.' })
-            .collect();
-        println!("{:08x}  {:<48}  {}", i * 16, hex, ascii);
-    }
-}
