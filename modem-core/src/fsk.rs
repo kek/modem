@@ -43,6 +43,71 @@ impl FskConfig {
     }
 }
 
+/// Convert bytes to a sequence of 3-bit symbols (MSB first within each byte).
+pub fn bytes_to_symbols(bytes: &[u8]) -> Vec<u8> {
+    let total_bits = bytes.len() * 8;
+    // Pad to a multiple of BITS_PER_SYMBOL with zero bits.
+    let n_syms = (total_bits + BITS_PER_SYMBOL - 1) / BITS_PER_SYMBOL;
+    let mut syms = Vec::with_capacity(n_syms);
+    let mut bit_idx = 0;
+    for _ in 0..n_syms {
+        let mut sym: u8 = 0;
+        for _ in 0..BITS_PER_SYMBOL {
+            let byte_i = bit_idx / 8;
+            let bit_i = 7 - (bit_idx % 8); // MSB first
+            let bit = if byte_i < bytes.len() {
+                (bytes[byte_i] >> bit_i) & 1
+            } else {
+                0 // pad
+            };
+            sym = (sym << 1) | bit;
+            bit_idx += 1;
+        }
+        syms.push(sym);
+    }
+    syms
+}
+
+/// Inverse of bytes_to_symbols. `n_bytes` is the expected output length;
+/// extra symbols (padding) are dropped.
+pub fn symbols_to_bytes(syms: &[u8], n_bytes: usize) -> Vec<u8> {
+    let mut out = vec![0u8; n_bytes];
+    let mut bit_idx = 0;
+    for &s in syms {
+        for k in 0..BITS_PER_SYMBOL {
+            let bit = (s >> (BITS_PER_SYMBOL - 1 - k)) & 1;
+            let byte_i = bit_idx / 8;
+            let bit_i = 7 - (bit_idx % 8);
+            if byte_i < n_bytes {
+                out[byte_i] |= bit << bit_i;
+            }
+            bit_idx += 1;
+        }
+    }
+    out
+}
+
+/// Modulate a symbol stream into audio samples.
+pub fn modulate(cfg: &FskConfig, symbols: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(symbols.len() * cfg.symbol_samples);
+    let dt = 1.0 / cfg.sample_rate as f32;
+    // Continuous phase across symbols to avoid clicks.
+    let mut phase = 0f32;
+    for &s in symbols {
+        debug_assert!((s as usize) < N_TONES);
+        let f = cfg.tone_freqs[s as usize];
+        let dphase = 2.0 * std::f32::consts::PI * f * dt;
+        for _ in 0..cfg.symbol_samples {
+            out.push(phase.sin() * 0.6); // leave headroom
+            phase += dphase;
+            if phase > std::f32::consts::TAU {
+                phase -= std::f32::consts::TAU;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +135,48 @@ mod tests {
             for &f in &c.tone_freqs {
                 assert!(f < nyq, "tone {f} exceeds Nyquist {nyq}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod modulator_tests {
+    use super::*;
+
+    #[test]
+    fn symbol_roundtrip_byte_aligned() {
+        // 3 bytes = 24 bits = 8 symbols exactly.
+        let bytes = vec![0xDE, 0xAD, 0xBE];
+        let syms = bytes_to_symbols(&bytes);
+        assert_eq!(syms.len(), 8);
+        let back = symbols_to_bytes(&syms, bytes.len());
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn symbol_roundtrip_unaligned() {
+        let bytes = vec![0x01, 0x02]; // 16 bits → 6 symbols (18 bits, padded)
+        let syms = bytes_to_symbols(&bytes);
+        assert_eq!(syms.len(), 6);
+        let back = symbols_to_bytes(&syms, bytes.len());
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn modulator_output_length() {
+        let cfg = FskConfig::audible();
+        let syms = vec![0u8; 10];
+        let samples = modulate(&cfg, &syms);
+        assert_eq!(samples.len(), 10 * cfg.symbol_samples);
+    }
+
+    #[test]
+    fn modulator_amplitude_bounded() {
+        let cfg = FskConfig::audible();
+        let syms = vec![3, 5, 7, 1];
+        let samples = modulate(&cfg, &syms);
+        for s in samples {
+            assert!(s.abs() <= 0.61, "sample out of headroom: {s}");
         }
     }
 }
