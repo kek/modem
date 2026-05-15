@@ -7,7 +7,7 @@ pub const HEADER_LEN: usize = 4;
 pub const MAX_PAYLOAD: usize = RS_DATA - HEADER_LEN; // 219
 pub const FRAME_LEN: usize = RS_DATA + RS_PARITY + 4; // 255 + 4 CRC = 259 bytes
 
-const VERSION: u8 = 0x01;
+pub const VERSION: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
@@ -28,6 +28,10 @@ impl FrameHeader {
             return Err(FrameError::BadVersion(b[0]));
         }
         let flags = b[1];
+        // Bit 0=first, 1=last, 2=ultrasonic; bits 3-7 are reserved and must be zero.
+        if flags & !0b111 != 0 {
+            return Err(FrameError::ReservedFlagsSet(flags));
+        }
         let payload_len = u16::from_be_bytes([b[2], b[3]]);
         if payload_len as usize > MAX_PAYLOAD {
             return Err(FrameError::PayloadTooLong(payload_len));
@@ -52,10 +56,14 @@ impl FrameHeader {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
-    #[error("payload too long: {0} > 219")]
+    #[error("payload too long: {0} > {MAX_PAYLOAD}")]
     PayloadTooLong(u16),
+    #[error("header says payload_len={header_says} but got {got} bytes")]
+    HeaderPayloadLenMismatch { header_says: u16, got: usize },
     #[error("bad version byte: 0x{0:02x}")]
     BadVersion(u8),
+    #[error("reserved flag bits set: 0b{0:08b}")]
+    ReservedFlagsSet(u8),
     #[error("frame length wrong: got {0}, expected {FRAME_LEN}")]
     BadLength(usize),
     #[error("RS uncorrectable")]
@@ -67,7 +75,10 @@ pub enum FrameError {
 /// Encode a frame into FRAME_LEN bytes.
 pub fn encode_frame(header: FrameHeader, payload: &[u8]) -> Result<[u8; FRAME_LEN], FrameError> {
     if payload.len() != header.payload_len as usize {
-        return Err(FrameError::PayloadTooLong(payload.len() as u16));
+        return Err(FrameError::HeaderPayloadLenMismatch {
+            header_says: header.payload_len,
+            got: payload.len(),
+        });
     }
     if payload.len() > MAX_PAYLOAD {
         return Err(FrameError::PayloadTooLong(payload.len() as u16));
@@ -99,13 +110,17 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(FrameHeader, Vec<u8>), FrameError> 
 
     let data = rs_decode(&cw).map_err(|_| FrameError::RsUncorrectable)?;
 
-    let header_bytes: [u8; HEADER_LEN] = data[..HEADER_LEN].try_into().unwrap();
+    let header_bytes: [u8; HEADER_LEN] = data[..HEADER_LEN]
+        .try_into()
+        .expect("FRAME_LEN was already checked above");
     let header = FrameHeader::from_bytes(&header_bytes)?;
     let payload_end = HEADER_LEN + header.payload_len as usize;
     let payload = data[HEADER_LEN..payload_end].to_vec();
 
     // Verify CRC
-    let crc_bytes: [u8; 4] = bytes[RS_DATA + RS_PARITY..].try_into().unwrap();
+    let crc_bytes: [u8; 4] = bytes[RS_DATA + RS_PARITY..]
+        .try_into()
+        .expect("FRAME_LEN was already checked above");
     let expected = u32::from_be_bytes(crc_bytes);
     let actual = crc32(&data[..payload_end]);
     if expected != actual {
@@ -163,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_crc_mismatch_after_rs_failure_unlikely() {
+    fn rs_failure_reported_as_rs_not_crc() {
         // 17+ errors → RS gives up. We treat as RsUncorrectable, not CRC.
         let payload = vec![0xAA; 100];
         let header = h(true, true, payload.len());
@@ -172,5 +187,19 @@ mod tests {
             bytes[i] ^= 0xFF;
         }
         assert!(matches!(decode_frame(&bytes), Err(FrameError::RsUncorrectable)));
+    }
+
+    #[test]
+    fn rejects_reserved_flag_bits() {
+        let mut bytes = encode_frame(
+            FrameHeader { first: true, last: true, ultrasonic: false, payload_len: 4 },
+            b"abcd",
+        ).unwrap();
+        // Forge a flag bit
+        bytes[1] |= 0b1000;
+        // Now CRC and RS won't match… RS may auto-correct it. To exercise the
+        // header check cleanly, decode the (mutated) header bytes directly:
+        let header_bytes: [u8; HEADER_LEN] = [VERSION, 0b0000_1011, 0, 4];
+        assert!(matches!(FrameHeader::from_bytes(&header_bytes), Err(FrameError::ReservedFlagsSet(_))));
     }
 }
