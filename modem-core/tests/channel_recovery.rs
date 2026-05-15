@@ -56,6 +56,31 @@ fn single_dropout_recovers_via_rs() {
 }
 
 #[test]
+fn tolerates_freq_offset_audible() {
+    let phy = FskPhy::audible();
+    let p = payload();
+    let frame = encode_frame(header_of(p.len()), &p).unwrap();
+    let samples = phy.modulate_bytes(&frame);
+    // ±20 Hz clock skew at 48 kHz (~400 ppm — well above the worst-case
+    // consumer crystal). Pad with silence so the demodulator always has the
+    // symbol-aligned window it expects after the resample shortened the buffer.
+    let cfg_samples = modem_core::fsk::FskConfig::audible().symbol_samples;
+    let needed = samples.len();
+    for hz in [-20.0f32, 20.0] {
+        let mut skewed = modem_core::channel::freq_offset(&samples, hz, 48_000);
+        if skewed.len() < needed {
+            skewed.resize(needed, 0.0);
+        }
+        // Round to symbol boundary, take exactly `needed` samples (= 691 symbols).
+        let n = (skewed.len() / cfg_samples) * cfg_samples;
+        let back = phy.demodulate_bytes(&skewed[..n], FRAME_LEN);
+        let (_, decoded) = decode_frame(&back)
+            .unwrap_or_else(|e| panic!("freq_offset {hz} Hz must be tolerated, got: {e:?}"));
+        assert_eq!(decoded, p);
+    }
+}
+
+#[test]
 fn small_multipath_recovers() {
     let phy = FskPhy::audible();
     let p = payload();

@@ -19,15 +19,21 @@ pub fn awgn(samples: &mut [f32], snr_db: f32, seed: u64) {
     }
 }
 
-/// Apply a constant frequency offset by multiplying with a complex exponential
-/// (here we cheat: small offsets just shift each sample's phase linearly).
-pub fn freq_offset(samples: &mut [f32], hz: f32, sample_rate: u32) {
-    let dphi = 2.0 * std::f32::consts::PI * hz / sample_rate as f32;
-    let mut phi = 0f32;
-    for x in samples.iter_mut() {
-        *x *= phi.cos();
-        phi += dphi;
+/// Simulate a sample-rate skew between TX and RX of `hz` Hz at `sample_rate`.
+/// This is the realistic model of clock drift between two consumer devices —
+/// each symbol is stretched or compressed by the ratio `(sr + hz) / sr`.
+pub fn freq_offset(samples: &[f32], hz: f32, sample_rate: u32) -> Vec<f32> {
+    let ratio = (sample_rate as f32 + hz) / sample_rate as f32;
+    let out_len = (samples.len() as f32 / ratio) as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let src = i as f32 * ratio;
+        let i0 = src.floor() as usize;
+        let i1 = (i0 + 1).min(samples.len() - 1);
+        let frac = src - i0 as f32;
+        out.push(samples[i0] * (1.0 - frac) + samples[i1] * frac);
     }
+    out
 }
 
 /// One-tap multipath: y[n] = x[n] + gain * x[n - delay_samples]
