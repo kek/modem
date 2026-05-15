@@ -180,3 +180,83 @@ mod modulator_tests {
         }
     }
 }
+
+/// Goertzel single-bin magnitude squared for frequency `f` in `samples`.
+fn goertzel_mag2(samples: &[f32], f: f32, sample_rate: u32) -> f32 {
+    let n = samples.len() as f32;
+    let k = (0.5 + n * f / sample_rate as f32).floor();
+    let w = 2.0 * std::f32::consts::PI * k / n;
+    let coeff = 2.0 * w.cos();
+    let (mut s0, mut s1, mut s2) = (0f32, 0f32, 0f32);
+    for &x in samples {
+        s0 = x + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    s1 * s1 + s2 * s2 - coeff * s1 * s2
+}
+
+/// Demodulate audio samples (assumed symbol-aligned) into a symbol stream.
+/// `samples.len()` must be a multiple of `cfg.symbol_samples`.
+pub fn demodulate(cfg: &FskConfig, samples: &[f32]) -> Vec<u8> {
+    let n = cfg.symbol_samples;
+    assert_eq!(samples.len() % n, 0, "demodulate: not symbol-aligned");
+    let n_syms = samples.len() / n;
+    let mut out = Vec::with_capacity(n_syms);
+    for i in 0..n_syms {
+        let win = &samples[i * n..(i + 1) * n];
+        let mut best_idx = 0usize;
+        let mut best_mag = f32::NEG_INFINITY;
+        for (t, &f) in cfg.tone_freqs.iter().enumerate() {
+            let m = goertzel_mag2(win, f, cfg.sample_rate);
+            if m > best_mag {
+                best_mag = m;
+                best_idx = t;
+            }
+        }
+        out.push(best_idx as u8);
+    }
+    out
+}
+
+#[cfg(test)]
+mod demod_tests {
+    use super::*;
+
+    #[test]
+    fn clean_roundtrip_audible() {
+        let cfg = FskConfig::audible();
+        let bytes = b"acoustic modem".to_vec();
+        let syms = bytes_to_symbols(&bytes);
+        let samples = modulate(&cfg, &syms);
+        let back_syms = demodulate(&cfg, &samples);
+        assert_eq!(back_syms, syms);
+        let back = symbols_to_bytes(&back_syms, bytes.len());
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn clean_roundtrip_ultrasonic() {
+        let cfg = FskConfig::ultrasonic();
+        let bytes = b"hi".to_vec();
+        let syms = bytes_to_symbols(&bytes);
+        let samples = modulate(&cfg, &syms);
+        let back = demodulate(&cfg, &samples);
+        assert_eq!(back, syms);
+    }
+
+    #[test]
+    fn resilient_to_small_white_noise() {
+        let cfg = FskConfig::audible();
+        let bytes = b"noise test 12345".to_vec();
+        let syms = bytes_to_symbols(&bytes);
+        let mut samples = modulate(&cfg, &syms);
+        // Add deterministic "noise" at ~-20 dB peak
+        for (i, s) in samples.iter_mut().enumerate() {
+            let n = ((i * 7919) % 7) as f32 / 7.0 - 0.5;
+            *s += n * 0.06;
+        }
+        let back = demodulate(&cfg, &samples);
+        assert_eq!(back, syms, "demodulator failed under mild noise");
+    }
+}
