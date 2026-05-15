@@ -4,6 +4,7 @@ use modem_codec::rx::{FrameEvent, Receiver};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 pub fn run(profile: Profile, output: Option<PathBuf>, hex: bool) -> anyhow::Result<()> {
     let phy = make_phy(profile);
@@ -12,16 +13,33 @@ pub fn run(profile: Profile, output: Option<PathBuf>, hex: bool) -> anyhow::Resu
 
     eprintln!("listening… (Ctrl-C to stop)");
 
+    let mut last_progress = Instant::now();
+    let mut started = false;
     loop {
-        let chunk = mic.rx.recv()?;
+        let chunk = match mic.rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(c) => c,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if started && last_progress.elapsed() > Duration::from_secs(10) {
+                    eprintln!("⚠ no progress for 10s, giving up");
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
         let events = rx.push_samples(&chunk);
         for ev in events {
             match ev {
                 FrameEvent::FrameOk { seq, bytes } => {
                     eprintln!("  frame {seq} ok ({} bytes)", bytes.len());
+                    started = true;
+                    last_progress = Instant::now();
                 }
                 FrameEvent::FrameDropped { seq, reason } => {
                     eprintln!("  frame {seq} dropped: {reason}");
+                    // Count as progress so we don't give up while frames arrive.
+                    started = true;
+                    last_progress = Instant::now();
                 }
                 FrameEvent::StreamComplete { bytes, sha256_ok } => {
                     eprintln!("✓ {} bytes received, sha256 {}", bytes.len(),
