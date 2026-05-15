@@ -1,1 +1,2 @@
-#![doc = "Desktop audio glue (cpal)."]
+pub mod output;
+pub mod input;
