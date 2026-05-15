@@ -2,4 +2,5 @@
 
 pub mod crc;
 pub mod frame;
+pub mod fsk;
 pub mod rs;
