@@ -19,15 +19,17 @@ pub fn rs_encode(data: &[u8; RS_DATA]) -> [u8; RS_TOTAL] {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RsError {
-    #[error("too many errors to correct (>16 bytes)")]
-    Uncorrectable,
+    #[error("too many errors to correct: {0}")]
+    Uncorrectable(String),
 }
 
 /// Decode a 255-byte codeword, correcting up to 16 byte errors.
 /// Returns the original 223 data bytes.
 pub fn rs_decode(codeword: &[u8; RS_TOTAL]) -> Result<[u8; RS_DATA], RsError> {
     let dec = Decoder::new(RS_PARITY);
-    let recovered = dec.correct(codeword, None).map_err(|_| RsError::Uncorrectable)?;
+    let recovered = dec
+        .correct(codeword, None)
+        .map_err(|e| RsError::Uncorrectable(format!("{e:?}")))?;
     let mut out = [0u8; RS_DATA];
     out.copy_from_slice(recovered.data());
     Ok(out)
