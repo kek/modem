@@ -671,6 +671,7 @@ dependencies = [
  "modem-audio",
  "modem-codec",
  "modem-core",
+ "tempfile",
 ]
 
 [[package]]
