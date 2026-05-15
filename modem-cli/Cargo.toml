@@ -1,0 +1,17 @@
+[package]
+name = "modem-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "modem"
+path = "src/main.rs"
+
+[dependencies]
+modem-core  = { path = "../modem-core" }
+modem-codec = { path = "../modem-codec" }
+modem-audio = { path = "../modem-audio" }
+clap   = { workspace = true }
+hound  = { workspace = true }
+anyhow = { workspace = true }

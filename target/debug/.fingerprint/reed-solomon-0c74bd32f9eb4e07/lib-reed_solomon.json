@@ -1,0 +1,1 @@
+{"rustc":16243257175721966122,"features":"[]","declared_features":"[\"unsafe_indexing\"]","target":4098769239490926909,"profile":5347358027863023418,"path":9354179761986135757,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug/.fingerprint/reed-solomon-0c74bd32f9eb4e07/dep-lib-reed_solomon","checksum":false}}],"rustflags":[],"config":2069994364910194474,"compile_kind":0}
