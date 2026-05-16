@@ -67,7 +67,13 @@ impl<P: Phy> Receiver<P> {
                 let search_end = self.buffer.len() - self.payload_samples;
                 let slice = &self.buffer[..search_end + tn];
                 if let Some((off, score)) = self.phy.detect_preamble(slice) {
-                    if score > 0.6 {
+                    // Threshold 0.3 — at the verified pure-noise ceiling
+                    // (see preamble.rs::rejects_pure_noise, which asserts <0.3),
+                    // well below clean-channel scores (~0.9+). Real-world
+                    // over-the-air scores land ~0.3-0.4 due to speaker/mic FR
+                    // and sample-rate drift. The sync-word check after preamble
+                    // is the secondary filter against false positives.
+                    if score > 0.3 {
                         // Drop everything up to and including the preamble.
                         self.buffer.drain(..off + tn);
                         self.state = State::AfterPreamble;
@@ -98,7 +104,6 @@ impl<P: Phy> Receiver<P> {
 
                 // Sync word is best-effort: log mismatch but still try the frame.
                 if sync_part != SYNC_WORD {
-                    // many sync errors → probably a false preamble; drop
                     let diffs = sync_part.iter().zip(SYNC_WORD.iter()).filter(|(a,b)| a != b).count();
                     if diffs > 1 {
                         events.push(FrameEvent::FrameDropped { seq: self.seq, reason: format!("bad sync word ({} mismatches)", diffs) });

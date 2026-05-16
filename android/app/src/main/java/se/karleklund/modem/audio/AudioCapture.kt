@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.util.Log
 import androidx.annotation.RequiresPermission
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,10 +52,24 @@ class AudioCapture {
 
         scope.launch {
             val chunk = FloatArray(2400) // 50 ms at 48 kHz
+            var chunkIdx = 0
             while (isActive) {
                 val n = rec.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
                 if (n > 0) {
                     val out = if (n == chunk.size) chunk.copyOf() else chunk.copyOf(n)
+                    // Diagnostic: log RMS + peak every ~500 ms so we can verify the mic is hot
+                    if (chunkIdx % 10 == 0) {
+                        var sumSq = 0.0
+                        var peak = 0f
+                        for (i in 0 until n) {
+                            val v = out[i]
+                            sumSq += (v * v).toDouble()
+                            if (kotlin.math.abs(v) > peak) peak = kotlin.math.abs(v)
+                        }
+                        val rms = kotlin.math.sqrt(sumSq / n)
+                        Log.i("ModemAudioCapture", "chunk=%d n=%d rms=%.4f peak=%.4f".format(chunkIdx, n, rms, peak))
+                    }
+                    chunkIdx++
                     val r = channel.trySend(out)
                     if (r.isFailure) {
                         // Channel full — drop oldest by receiving and ignoring.
