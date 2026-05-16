@@ -11,6 +11,10 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub struct FskConfig {
     pub sample_rate: u32,
     pub symbol_samples: usize,
+    /// Length (in samples) of the raised-cosine ramp at each symbol edge.
+    /// 0 = legacy rectangular envelope. Set ≈10% of `symbol_samples` to
+    /// soften the speaker drive at frequency transitions.
+    pub ramp_samples: usize,
     /// 8 distinct frequencies, in Hz.
     pub tone_freqs: [f32; N_TONES],
 }
@@ -34,9 +38,15 @@ impl FskConfig {
         for i in 0..N_TONES {
             tones[i] = 2000.0 + (i as f32) * 200.0; // 2000..3400
         }
+        let symbol_samples = SAMPLE_RATE as usize / 50; // 20 ms
         Self {
             sample_rate: SAMPLE_RATE,
-            symbol_samples: SAMPLE_RATE as usize / 50, // 20 ms
+            symbol_samples,
+            // 2 ms raised-cosine edges (~10% of symbol). Softens the speaker
+            // drive at every frequency change, which on small phone speakers
+            // suppresses the transient nonlinearity that leaks energy into
+            // neighbour tones at the receiver. See docs/android-smoke-test.md.
+            ramp_samples: symbol_samples / 10,
             tone_freqs: tones,
         }
     }
@@ -47,9 +57,11 @@ impl FskConfig {
         for i in 0..N_TONES {
             tones[i] = 17_500.0 + (i as f32) * 250.0;
         }
+        let symbol_samples = SAMPLE_RATE as usize / 50; // 20 ms
         Self {
             sample_rate: SAMPLE_RATE,
-            symbol_samples: SAMPLE_RATE as usize / 50, // 20 ms
+            symbol_samples,
+            ramp_samples: symbol_samples / 10,
             tone_freqs: tones,
         }
     }
@@ -100,17 +112,26 @@ pub fn symbols_to_bytes(syms: &[u8], n_bytes: usize) -> Vec<u8> {
 }
 
 /// Modulate a symbol stream into audio samples.
+///
+/// Phase is continuous across symbols (CPFSK). On top of that, each symbol is
+/// multiplied by a Tukey (raised-cosine-tapered) envelope so the carrier
+/// amplitude eases through every frequency transition instead of switching
+/// abruptly. This significantly reduces the transient broadband splatter that
+/// small phone speakers produce when slammed with instantaneous frequency
+/// jumps.
 pub fn modulate(cfg: &FskConfig, symbols: &[u8]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(symbols.len() * cfg.symbol_samples);
+    let n = cfg.symbol_samples;
+    let r = cfg.ramp_samples.min(n / 2);
+    let mut out = Vec::with_capacity(symbols.len() * n);
     let dt = 1.0 / cfg.sample_rate as f32;
-    // Continuous phase across symbols to avoid clicks.
     let mut phase = 0f32;
     for &s in symbols {
         debug_assert!((s as usize) < N_TONES);
         let f = cfg.tone_freqs[s as usize];
         let dphase = 2.0 * std::f32::consts::PI * f * dt;
-        for _ in 0..cfg.symbol_samples {
-            out.push(phase.sin() * 0.6); // leave headroom
+        for k in 0..n {
+            let env = tukey_envelope(k, n, r);
+            out.push(phase.sin() * 0.6 * env); // 0.6 leaves headroom
             phase += dphase;
             if phase > std::f32::consts::TAU {
                 phase -= std::f32::consts::TAU;
@@ -118,6 +139,23 @@ pub fn modulate(cfg: &FskConfig, symbols: &[u8]) -> Vec<f32> {
         }
     }
     out
+}
+
+/// Tukey (cosine-tapered) window sample at position `k` of an `n`-sample
+/// symbol, with `r`-sample raised-cosine ramps on each edge. r == 0 is
+/// rectangular (legacy behaviour).
+fn tukey_envelope(k: usize, n: usize, r: usize) -> f32 {
+    if r == 0 {
+        return 1.0;
+    }
+    if k < r {
+        0.5 * (1.0 - (std::f32::consts::PI * k as f32 / r as f32).cos())
+    } else if k >= n - r {
+        let m = n - 1 - k;
+        0.5 * (1.0 - (std::f32::consts::PI * m as f32 / r as f32).cos())
+    } else {
+        1.0
+    }
 }
 
 #[cfg(test)]
