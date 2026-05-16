@@ -16,3 +16,4 @@ android/local.properties
 android/.idea/
 android/*.iml
 android/app/*.iml
+captures/
