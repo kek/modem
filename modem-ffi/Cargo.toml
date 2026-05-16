@@ -1,0 +1,15 @@
+[package]
+name = "modem-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "modem_ffi"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+modem-core  = { path = "../modem-core" }
+modem-codec = { path = "../modem-codec" }
+uniffi      = { workspace = true }

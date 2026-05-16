@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["modem-core", "modem-codec", "modem-audio", "modem-cli"]
+members = ["modem-core", "modem-codec", "modem-audio", "modem-cli", "modem-ffi"]
 
 [workspace.package]
 edition = "2021"
@@ -18,3 +18,4 @@ reed-solomon = "0.2"
 rustfft     = "6.2"
 sha2        = "0.10"
 thiserror   = "1"
+uniffi      = "0.28"
