@@ -7,6 +7,11 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
 import androidx.annotation.RequiresPermission
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -50,6 +55,12 @@ class AudioCapture {
         record = rec
         rec.startRecording()
 
+        // Diagnostic: dump all captured samples to /sdcard/Download/mic-<ts>.wav
+        val wavFile = File("/sdcard/Download/mic-${System.currentTimeMillis()}.wav")
+        val wavOut = DataOutputStream(FileOutputStream(wavFile))
+        writeWavHeader(wavOut, SAMPLE_RATE_HZ)
+        Log.i("ModemAudioCapture", "writing WAV to ${wavFile.absolutePath}")
+
         scope.launch {
             val chunk = FloatArray(2400) // 50 ms at 48 kHz
             var chunkIdx = 0
@@ -57,6 +68,10 @@ class AudioCapture {
                 val n = rec.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
                 if (n > 0) {
                     val out = if (n == chunk.size) chunk.copyOf() else chunk.copyOf(n)
+                    // Append raw samples to WAV (little-endian float32)
+                    val bb = ByteBuffer.allocate(n * 4).order(ByteOrder.LITTLE_ENDIAN)
+                    for (i in 0 until n) bb.putFloat(out[i])
+                    wavOut.write(bb.array())
                     // Diagnostic: log RMS + peak every ~500 ms so we can verify the mic is hot
                     if (chunkIdx % 10 == 0) {
                         var sumSq = 0.0
@@ -87,5 +102,29 @@ class AudioCapture {
         record = null
         scope.cancel()
         channel.close()
+    }
+
+    private fun writeWavHeader(out: DataOutputStream, sampleRate: Int) {
+        val bitsPerSample = 32
+        val channels = 1
+        val byteRate = sampleRate * channels * bitsPerSample / 8
+        val blockAlign = channels * bitsPerSample / 8
+        val audioFormat = 3 // IEEE float
+        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+        header.put("RIFF".toByteArray())
+        header.putInt(0x7FFFFFFE)
+        header.put("WAVE".toByteArray())
+        header.put("fmt ".toByteArray())
+        header.putInt(16)
+        header.putShort(audioFormat.toShort())
+        header.putShort(channels.toShort())
+        header.putInt(sampleRate)
+        header.putInt(byteRate)
+        header.putShort(blockAlign.toShort())
+        header.putShort(bitsPerSample.toShort())
+        header.put("data".toByteArray())
+        header.putInt(0x7FFFFFFE)
+        out.write(header.array())
+        out.flush()
     }
 }

@@ -16,15 +16,27 @@ pub struct FskConfig {
 }
 
 impl FskConfig {
-    /// Audible profile: 8-FSK, 100 sym/s, 500 Hz spacing, 2.0 – 5.5 kHz.
+    /// Audible profile: 8-FSK, 50 sym/s, 200 Hz spacing, 2.0 – 3.4 kHz.
+    ///
+    /// Tones live in the flattest region of typical built-in laptop / phone
+    /// speaker+mic response. Outside this band, response drops 6+ dB on many
+    /// devices, causing Goertzel to confuse tones.
+    ///
+    /// 20 ms symbols (960 samples @ 48 kHz) give Goertzel ≈50 Hz bin
+    /// resolution, so adjacent tones at 200 Hz spacing are 4 bins apart —
+    /// strongly selective even under speaker/mic FR variation. 10 ms symbols
+    /// (the previous setting) gave only 2 bins of separation, which led to
+    /// bit errors in real over-the-air decode (Mac↔Android).
+    ///
+    /// Throughput: ~150 bps raw.
     pub fn audible() -> Self {
         let mut tones = [0f32; N_TONES];
         for i in 0..N_TONES {
-            tones[i] = 2000.0 + (i as f32) * 500.0; // 2000..5500
+            tones[i] = 2000.0 + (i as f32) * 200.0; // 2000..3400
         }
         Self {
             sample_rate: SAMPLE_RATE,
-            symbol_samples: SAMPLE_RATE as usize / 100, // 10 ms
+            symbol_samples: SAMPLE_RATE as usize / 50, // 20 ms
             tone_freqs: tones,
         }
     }
@@ -115,9 +127,9 @@ mod tests {
     #[test]
     fn audible_geometry() {
         let c = FskConfig::audible();
-        assert_eq!(c.symbol_samples, 480);
+        assert_eq!(c.symbol_samples, 960);
         assert_eq!(c.tone_freqs[0], 2000.0);
-        assert_eq!(c.tone_freqs[7], 5500.0);
+        assert_eq!(c.tone_freqs[7], 3400.0);
     }
 
     #[test]

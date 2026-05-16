@@ -67,13 +67,13 @@ impl<P: Phy> Receiver<P> {
                 let search_end = self.buffer.len() - self.payload_samples;
                 let slice = &self.buffer[..search_end + tn];
                 if let Some((off, score)) = self.phy.detect_preamble(slice) {
-                    // Threshold 0.3 — at the verified pure-noise ceiling
-                    // (see preamble.rs::rejects_pure_noise, which asserts <0.3),
-                    // well below clean-channel scores (~0.9+). Real-world
-                    // over-the-air scores land ~0.3-0.4 due to speaker/mic FR
-                    // and sample-rate drift. The sync-word check after preamble
-                    // is the secondary filter against false positives.
-                    if score > 0.3 {
+                    // Threshold 0.25 — near the verified pure-noise ceiling
+                    // (preamble.rs::rejects_pure_noise asserts <0.3 for a
+                    // specific synthetic case; real ambient noise scores
+                    // lower). Clean-channel scores are >0.9, real over-the-air
+                    // through small speaker+mic chains is ~0.28-0.4. The sync
+                    // word + RS+CRC catch false positives that get past this.
+                    if score > 0.25 {
                         // Drop everything up to and including the preamble.
                         self.buffer.drain(..off + tn);
                         self.state = State::AfterPreamble;
@@ -102,11 +102,18 @@ impl<P: Phy> Receiver<P> {
                 }
                 let (sync_part, frame_part) = raw.split_at(SYNC_WORD.len());
 
-                // Sync word is best-effort: log mismatch but still try the frame.
+                // Sync word: count *bit* mismatches across the 16-bit sync.
+                // Allow up to 4 (75% bits correct still strongly indicates a
+                // real preamble; pure noise scores ~8). RS+CRC catches the
+                // rest if this lets a false preamble through.
                 if sync_part != SYNC_WORD {
-                    let diffs = sync_part.iter().zip(SYNC_WORD.iter()).filter(|(a,b)| a != b).count();
-                    if diffs > 1 {
-                        events.push(FrameEvent::FrameDropped { seq: self.seq, reason: format!("bad sync word ({} mismatches)", diffs) });
+                    let bit_diffs: u32 = sync_part
+                        .iter()
+                        .zip(SYNC_WORD.iter())
+                        .map(|(a, b)| (a ^ b).count_ones())
+                        .sum();
+                    if bit_diffs > 4 {
+                        events.push(FrameEvent::FrameDropped { seq: self.seq, reason: format!("bad sync word ({} bit diffs)", bit_diffs) });
                         self.seq += 1;
                         return true;
                     }
