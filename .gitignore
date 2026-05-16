@@ -8,3 +8,11 @@ Cargo.lock
 android/app/src/main/jniLibs/
 android/app/src/main/java/uniffi/
 
+# Android Gradle build/cache artifacts and local-only config.
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
