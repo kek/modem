@@ -17,6 +17,8 @@ hound  = { workspace = true }
 anyhow = { workspace = true }
 serde  = { version = "1", features = ["derive"] }
 toml   = "0.8"
+ratatui   = "0.28"
+crossterm = "0.28"
 
 [dev-dependencies]
 tempfile = "3"

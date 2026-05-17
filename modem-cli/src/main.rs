@@ -5,6 +5,7 @@ mod cmd_tx_wav;
 mod cmd_rank;
 mod output_format;
 mod reporter;
+mod tui;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use modem_core::fsk::DspVariants;
