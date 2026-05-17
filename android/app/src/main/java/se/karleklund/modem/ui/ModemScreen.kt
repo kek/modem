@@ -3,7 +3,9 @@ package se.karleklund.modem.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
@@ -20,6 +22,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,8 +31,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import se.karleklund.modem.ModemViewModel
 import se.karleklund.modem.UiState
+import se.karleklund.modem.viz.FrameTimeline
+import se.karleklund.modem.viz.ListeningIndicator
+import se.karleklund.modem.viz.ResultPulse
+import se.karleklund.modem.viz.ToneBars
+import se.karleklund.modem.viz.TxProgress
 import uniffi.modem_ffi.DspVariants
 import uniffi.modem_ffi.Profile
 
@@ -39,8 +48,19 @@ fun ModemScreen(vm: ModemViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val profile by vm.profile.collectAsStateWithLifecycle()
     val variants by vm.variants.collectAsStateWithLifecycle()
+    val vizState by vm.viz.state.collectAsStateWithLifecycle()
+    val txElapsed by vm.txElapsedSec.collectAsStateWithLifecycle()
     var text by rememberSaveable { mutableStateOf("hello from Android") }
     var showHex by remember { mutableStateOf(false) }
+
+    LaunchedEffect(state) {
+        if (state is UiState.Receiving) {
+            while (true) {
+                delay(1000L)
+                vm.viz.tickWatchdog()
+            }
+        }
+    }
 
     Scaffold(topBar = { CenterAlignedTopAppBar(title = { Text("Modem") }) }) { pad ->
         Column(
@@ -99,13 +119,42 @@ fun ModemScreen(vm: ModemViewModel) {
                 }
             }
 
+            // Visualization: tone bars + frame timeline + indicators.
+            val tones = remember(profile) {
+                when (profile) {
+                    Profile.AUDIBLE -> FloatArray(8) { 2000f + it * 200f }
+                    Profile.ULTRASONIC -> FloatArray(8) { 17_500f + it * 250f }
+                }
+            }
+            ToneBars(tonesDb = vizState.tonesDb, freqs = tones, modifier = Modifier.fillMaxWidth())
+            if (vizState.timeline.isNotEmpty()) {
+                FrameTimeline(timeline = vizState.timeline, modifier = Modifier.fillMaxWidth())
+            }
+            val s0 = state
+            if (s0 is UiState.Receiving && vizState.searching) {
+                ListeningIndicator()
+            }
+            if (s0 is UiState.Receiving) {
+                val wd = vizState.watchdogSecondsLeft
+                Text(
+                    "listening · ${vizState.totalOk} ok · ${vizState.totalDropped} dropped" +
+                            (wd?.let { " · watchdog ${it}s" } ?: ""),
+                )
+            }
+            if (s0 is UiState.Sending) {
+                TxProgress(elapsedSec = txElapsed, totalSec = s0.seconds, bytes = s0.bytes)
+            }
+            Spacer(Modifier.height(4.dp))
+
             // Status / result
             when (val s = state) {
                 UiState.Idle -> Text("Ready")
                 is UiState.Sending -> Text("Sending ${s.bytes} B (${"%.1f".format(s.seconds)} s)…")
                 is UiState.Receiving -> Text("Listening… ${s.framesOk} frame(s) ok")
                 is UiState.Error -> Text("Error: ${s.message}")
-                is UiState.Result -> ResultView(s.bytes, s.sha256Ok, showHex, onToggle = { showHex = !showHex })
+                is UiState.Result -> ResultPulse(ok = s.sha256Ok) {
+                    ResultView(s.bytes, s.sha256Ok, showHex, onToggle = { showHex = !showHex })
+                }
             }
         }
     }
