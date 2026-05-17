@@ -1,3 +1,4 @@
+mod cmd_chat;
 mod cmd_rx_wav;
 mod cmd_send;
 mod cmd_recv;
@@ -87,6 +88,13 @@ enum Cmd {
         /// describing what each capture should decode to.
         corpus: PathBuf,
     },
+    /// Interactive: type a line, press Enter, transmit it; repeat.
+    Chat {
+        #[arg(long, value_enum, default_value_t = Profile::Audible)]
+        profile: Profile,
+        #[command(flatten)]
+        variants: VariantArgs,
+    },
 }
 
 /// DSP variant toggles. All default to OFF (trunk baseline). The `rank`
@@ -143,6 +151,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::TxWav { profile, variants, input, output } => cmd_tx_wav::run(profile, variants.into(), input, output),
         Cmd::RxWav { profile, variants, input, output, hex } => cmd_rx_wav::run(profile, variants.into(), input, output, hex),
         Cmd::Rank { corpus } => cmd_rank::run(corpus),
+        Cmd::Chat { profile, variants } => cmd_chat::run(profile, variants.into()),
     }
 }
 
