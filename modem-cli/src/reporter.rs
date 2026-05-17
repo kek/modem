@@ -10,6 +10,8 @@ pub enum RxEvent<'a> {
     Listening,
     Chunk(&'a [f32]),
     Frame(&'a FrameEvent),
+    /// Seconds remaining on the no-progress watchdog (0 = giving up).
+    Watchdog { seconds_left: u32 },
 }
 
 /// Send-side events the runner emits.
@@ -52,6 +54,11 @@ impl Reporter for PlainReporter {
                     bytes.len(),
                     if *sha256_ok { "ok" } else { "MISMATCH" },
                 );
+            }
+            RxEvent::Watchdog { seconds_left } => {
+                if seconds_left == 0 {
+                    eprintln!("⚠ no progress for 10s, giving up");
+                }
             }
         }
     }

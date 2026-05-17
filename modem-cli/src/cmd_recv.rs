@@ -28,9 +28,13 @@ pub fn run(
         let chunk = match mic.rx.recv_timeout(Duration::from_millis(500)) {
             Ok(c) => c,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if started && last_progress.elapsed() > Duration::from_secs(10) {
-                    eprintln!("⚠ no progress for 10s, giving up");
-                    return Ok(());
+                if started {
+                    let elapsed = last_progress.elapsed().as_secs() as u32;
+                    let left = 10u32.saturating_sub(elapsed);
+                    reporter.on_rx(RxEvent::Watchdog { seconds_left: left });
+                    if last_progress.elapsed() > Duration::from_secs(10) {
+                        return Ok(());
+                    }
                 }
                 continue;
             }

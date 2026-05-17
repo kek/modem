@@ -48,6 +48,7 @@ enum Mode {
         total_dropped: usize,
         rms: f32,
         listening_start: Instant,
+        watchdog_secs: Option<u32>,
     },
     Tx {
         bytes: usize,
@@ -87,6 +88,7 @@ impl TuiReporter {
                 total_dropped: 0,
                 rms: 0.0,
                 listening_start: Instant::now(),
+                watchdog_secs: None,
             },
             freqs: cfg.tone_freqs.to_vec(),
             sample_rate: cfg.sample_rate,
@@ -154,14 +156,15 @@ impl TuiReporter {
     }
 
     fn draw_rx(&mut self) {
-        let (tones, timeline, total_ok, total_dropped, rms, elapsed) = match &self.mode {
-            Mode::Rx { tones_db, timeline, total_ok, total_dropped, rms, listening_start } => (
+        let (tones, timeline, total_ok, total_dropped, rms, elapsed, wd) = match &self.mode {
+            Mode::Rx { tones_db, timeline, total_ok, total_dropped, rms, listening_start, watchdog_secs } => (
                 tones_db.clone(),
                 timeline.iter().map(|m| (m.seq, m.status)).collect::<Vec<_>>(),
                 *total_ok,
                 *total_dropped,
                 *rms,
                 listening_start.elapsed().as_secs_f32(),
+                *watchdog_secs,
             ),
             _ => return,
         };
@@ -200,8 +203,9 @@ impl TuiReporter {
             );
             f.render_widget(tl, layout[1]);
 
+            let wd_str = wd.map(|s| format!(" · watchdog {s}s")).unwrap_or_default();
             let status = format!(
-                " listening {elapsed:.1} s · {total_ok} ok · {total_dropped} dropped · q to quit "
+                " listening {elapsed:.1} s · {total_ok} ok · {total_dropped} dropped{wd_str} · q to quit "
             );
             f.render_widget(Paragraph::new(status), layout[2]);
         });
@@ -290,8 +294,16 @@ impl Reporter for TuiReporter {
                 self.update_tones(samples);
                 self.draw_rx();
             }
+            RxEvent::Watchdog { seconds_left } => {
+                if let Mode::Rx { watchdog_secs, .. } = &mut self.mode {
+                    *watchdog_secs = Some(seconds_left);
+                }
+                self.draw_rx();
+            }
             RxEvent::Frame(ev) => {
-                if let Mode::Rx { timeline, total_ok, total_dropped, .. } = &mut self.mode {
+                if let Mode::Rx { timeline, total_ok, total_dropped, watchdog_secs, .. } = &mut self.mode {
+                    // Frame received → reset watchdog readout.
+                    *watchdog_secs = None;
                     match ev {
                         FrameEvent::FrameOk { seq, .. } => {
                             if timeline.len() >= MAX_TIMELINE { timeline.remove(0); }
