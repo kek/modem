@@ -1,12 +1,13 @@
 use crate::{make_phy, Profile};
 use hound::{SampleFormat, WavSpec, WavWriter};
 use modem_codec::tx::Transmitter;
+use modem_core::fsk::DspVariants;
 use std::fs;
 use std::path::PathBuf;
 
-pub fn run(profile: Profile, input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
+pub fn run(profile: Profile, variants: DspVariants, input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
     let bytes = fs::read(&input)?;
-    let phy = make_phy(profile);
+    let phy = make_phy(profile, variants);
     let ultrasonic = matches!(profile, Profile::Ultrasonic);
     let tx = Transmitter::new(phy, ultrasonic);
     let samples = tx.encode(&bytes);

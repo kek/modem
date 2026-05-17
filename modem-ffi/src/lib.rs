@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use modem_codec::rx::{FrameEvent as CoreFrameEvent, Receiver as CoreReceiver};
 use modem_codec::tx::Transmitter as CoreTransmitter;
+use modem_core::fsk::DspVariants as CoreDspVariants;
 use modem_core::phy::FskPhy;
 
 uniffi::setup_scaffolding!();
@@ -14,10 +15,31 @@ pub enum Profile {
     Ultrasonic,
 }
 
-fn phy_for(profile: &Profile) -> FskPhy {
+/// DSP variant toggles exposed to the Android UI. All default to OFF
+/// (legacy trunk behaviour). See modem_core::fsk::DspVariants for what
+/// each one does.
+#[derive(uniffi::Record, Default, Clone, Copy)]
+pub struct DspVariants {
+    pub pulse_shape: bool,
+    pub matched_filter: bool,
+    pub timing_recovery: bool,
+}
+
+impl From<DspVariants> for CoreDspVariants {
+    fn from(v: DspVariants) -> Self {
+        CoreDspVariants {
+            pulse_shape: v.pulse_shape,
+            matched_filter: v.matched_filter,
+            timing_recovery: v.timing_recovery,
+        }
+    }
+}
+
+fn phy_for(profile: &Profile, variants: DspVariants) -> FskPhy {
+    let v: CoreDspVariants = variants.into();
     match profile {
-        Profile::Audible => FskPhy::audible(),
-        Profile::Ultrasonic => FskPhy::ultrasonic(),
+        Profile::Audible => FskPhy::audible_with(v),
+        Profile::Ultrasonic => FskPhy::ultrasonic_with(v),
     }
 }
 
@@ -29,10 +51,10 @@ pub struct FfiTransmitter {
 #[uniffi::export]
 impl FfiTransmitter {
     #[uniffi::constructor]
-    pub fn new(profile: Profile) -> std::sync::Arc<Self> {
+    pub fn new(profile: Profile, variants: DspVariants) -> std::sync::Arc<Self> {
         let ultrasonic = matches!(profile, Profile::Ultrasonic);
         std::sync::Arc::new(Self {
-            inner: CoreTransmitter::new(phy_for(&profile), ultrasonic),
+            inner: CoreTransmitter::new(phy_for(&profile, variants), ultrasonic),
         })
     }
 
@@ -67,9 +89,9 @@ pub struct FfiReceiver {
 #[uniffi::export]
 impl FfiReceiver {
     #[uniffi::constructor]
-    pub fn new(profile: Profile) -> std::sync::Arc<Self> {
+    pub fn new(profile: Profile, variants: DspVariants) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
-            inner: Mutex::new(CoreReceiver::new(phy_for(&profile))),
+            inner: Mutex::new(CoreReceiver::new(phy_for(&profile, variants))),
         })
     }
 

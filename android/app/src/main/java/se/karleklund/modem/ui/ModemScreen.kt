@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -29,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import se.karleklund.modem.ModemViewModel
 import se.karleklund.modem.UiState
+import uniffi.modem_ffi.DspVariants
 import uniffi.modem_ffi.Profile
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,6 +38,7 @@ import uniffi.modem_ffi.Profile
 fun ModemScreen(vm: ModemViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val profile by vm.profile.collectAsStateWithLifecycle()
+    val variants by vm.variants.collectAsStateWithLifecycle()
     var text by rememberSaveable { mutableStateOf("hello from Android") }
     var showHex by remember { mutableStateOf(false) }
 
@@ -56,6 +59,26 @@ fun ModemScreen(vm: ModemViewModel) {
                         Text(p.name.lowercase().replaceFirstChar { it.uppercase() })
                     }
                 }
+            }
+
+            // DSP variant toggles — flip individually to A/B which combination
+            // works best over-the-air. All off = trunk baseline.
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(
+                    selected = variants.pulseShape,
+                    onClick = { vm.setVariants(variants.copy(pulseShape = !variants.pulseShape)) },
+                    label = { Text("pulse-shape (TX)") },
+                )
+                FilterChip(
+                    selected = variants.matchedFilter,
+                    onClick = { vm.setVariants(variants.copy(matchedFilter = !variants.matchedFilter)) },
+                    label = { Text("matched (RX)") },
+                )
+                FilterChip(
+                    selected = variants.timingRecovery,
+                    onClick = { vm.setVariants(variants.copy(timingRecovery = !variants.timingRecovery)) },
+                    label = { Text("timing (RX)") },
+                )
             }
 
             OutlinedTextField(
