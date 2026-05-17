@@ -264,6 +264,27 @@ mod modulator_tests {
             assert!(s.abs() <= 0.61, "sample out of headroom: {s}");
         }
     }
+
+    #[test]
+    fn goertzel_bank_picks_the_right_tone() {
+        // Pure 2200 Hz sine, 20 ms at 48 kHz = 960 samples.
+        let cfg = FskConfig::audible();
+        let n = cfg.symbol_samples;
+        let f0 = cfg.tone_freqs[1]; // 2200 Hz
+        let mut samples = vec![0f32; n];
+        for k in 0..n {
+            let t = k as f32 / cfg.sample_rate as f32;
+            samples[k] = (2.0 * std::f32::consts::PI * f0 * t).sin();
+        }
+        let mags = goertzel_bank(&samples, &cfg.tone_freqs, cfg.sample_rate);
+        assert_eq!(mags.len(), N_TONES);
+        // The 2200 Hz bin must dominate by >10× over every other bin.
+        let target = mags[1];
+        for (i, &m) in mags.iter().enumerate() {
+            if i == 1 { continue; }
+            assert!(target > 10.0 * m, "tone {} not dominant: {:?}", i, mags);
+        }
+    }
 }
 
 /// Goertzel single-bin magnitude squared for frequency `f` in `samples`.
@@ -279,6 +300,14 @@ fn goertzel_mag2(samples: &[f32], f: f32, sample_rate: u32) -> f32 {
         s1 = s0;
     }
     s1 * s1 + s2 * s2 - coeff * s1 * s2
+}
+
+/// Compute Goertzel magnitude² for each frequency in `freqs` against the
+/// given buffer of f32 samples. Returns one magnitude per frequency, in the
+/// same order. Used by visualization layers that want per-tone energy
+/// without running the full demod state machine.
+pub fn goertzel_bank(samples: &[f32], freqs: &[f32], sample_rate: u32) -> Vec<f32> {
+    freqs.iter().map(|&f| goertzel_mag2(samples, f, sample_rate)).collect()
 }
 
 /// Full-length Tukey window of length `n` with `alpha/2` raised-cosine
