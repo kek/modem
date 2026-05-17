@@ -961,6 +961,7 @@ dependencies = [
  "modem-core",
  "ratatui",
  "serde",
+ "sha2",
  "tempfile",
  "toml 0.8.23",
 ]

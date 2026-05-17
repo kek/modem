@@ -6,7 +6,10 @@ use crate::{make_phy, Profile};
 use modem_audio::input::open_mic;
 use modem_codec::rx::{FrameEvent, Receiver};
 use modem_codec::tx::Transmitter;
+use modem_core::frame::{FRAME_LEN, HEADER_LEN, MAX_PAYLOAD};
 use modem_core::fsk::{goertzel_bank, DspVariants, FskConfig};
+use modem_core::phy::{FskPhy, Phy};
+use modem_core::preamble::SYNC_WORD;
 use std::io::stdout;
 use std::sync::mpsc;
 use std::thread;
@@ -31,7 +34,6 @@ const DB_FLOOR: f32 = -80.0;
 const DB_CEIL: f32 = 0.0;
 const MAX_LOG: usize = 200;
 const MAX_TIMELINE: usize = 64;
-const CHUNK_SAMPLES: usize = 2400; // 50 ms at 48 kHz
 
 #[derive(Clone)]
 enum LogEntry {
@@ -51,6 +53,39 @@ struct TxInFlight {
     /// Index into the chat log of the matching `Sent` entry, so the renderer
     /// can highlight characters up to the current playback progress.
     log_pos: usize,
+    /// Segmented breakdown of the encoded buffer (preamble / sync / header
+    /// / payload / RS parity / CRC, per frame) for the structure panel.
+    segments: Vec<Segment>,
+}
+
+#[derive(Clone)]
+struct Segment {
+    start_sample: usize,
+    end_sample: usize,
+    kind: SegKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SegKind {
+    Preamble,
+    Sync,
+    Header,
+    Payload,
+    RsParity,
+    Crc,
+}
+
+impl SegKind {
+    fn color(self) -> Color {
+        match self {
+            SegKind::Preamble => Color::Magenta,
+            SegKind::Sync => Color::Cyan,
+            SegKind::Header => Color::Blue,
+            SegKind::Payload => Color::Green,
+            SegKind::RsParity => Color::Yellow,
+            SegKind::Crc => Color::Red,
+        }
+    }
 }
 
 pub fn run(profile: Profile, variants: DspVariants) -> anyhow::Result<()> {
@@ -161,6 +196,7 @@ fn run_loop(
                                 let bytes = input.as_bytes().to_vec();
                                 let samples = tx.encode(&bytes);
                                 let total_sec = samples.len() as f32 / sample_rate as f32;
+                                let segments = compute_segments(&bytes, profile, variants);
                                 push_log(&mut log, LogEntry::Sent(input.clone()));
                                 let log_pos = log.len() - 1;
                                 let samples_for_play = samples.clone();
@@ -177,6 +213,7 @@ fn run_loop(
                                     bytes: bytes.len(),
                                     done_rx,
                                     log_pos,
+                                    segments,
                                 });
                                 input.clear();
                             }
@@ -202,12 +239,21 @@ fn run_loop(
                 Some(t) => (Some(t.bytes), Some(t.total_sec), elapsed_tx),
                 None => (None, None, None),
             };
+            let tx_snapshot = tx_state.as_ref().map(|t| {
+                (
+                    t.cursor,
+                    t.samples.len(),
+                    t.segments.clone(),
+                )
+            });
             term.draw(|f| {
                 let area = f.area();
+                let struct_h: u16 = if tx_snapshot.is_some() { 4 } else { 0 };
                 let layout = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(11),
+                        Constraint::Length(struct_h),
                         Constraint::Length(3),
                         Constraint::Min(3),
                         Constraint::Length(3),
@@ -232,6 +278,19 @@ fn run_loop(
                     layout[0],
                 );
 
+                // Frame structure panel (only while transmitting).
+                if let Some((cursor, total, segments)) = tx_snapshot.as_ref() {
+                    let inner_w = layout[1].width.saturating_sub(2) as usize;
+                    let (legend, bar) = render_structure(*cursor, *total, segments, inner_w);
+                    let lines = vec![legend, bar];
+                    f.render_widget(
+                        Paragraph::new(lines).block(
+                            Block::default().borders(Borders::ALL).title(" frame structure ")
+                        ),
+                        layout[1],
+                    );
+                }
+
                 // Frame timeline chips.
                 let chips: Vec<Span> = timeline.iter().flat_map(|(seq, ok)| {
                     let (label, color) = if *ok {
@@ -247,11 +306,11 @@ fn run_loop(
                             .borders(Borders::ALL)
                             .title(format!(" frames · {total_ok} ok · {total_dropped} dropped "))
                     ),
-                    layout[1],
+                    layout[2],
                 );
 
                 // Message log (most recent at bottom, scrolling).
-                let log_height = layout[2].height.saturating_sub(2) as usize;
+                let log_height = layout[3].height.saturating_sub(2) as usize;
                 let log_start = log.len().saturating_sub(log_height);
                 let in_flight = tx_state.as_ref().map(|t| {
                     let progress = (t.cursor as f32 / t.samples.len().max(1) as f32).clamp(0.0, 1.0);
@@ -306,18 +365,18 @@ fn run_loop(
                     .collect();
                 f.render_widget(
                     Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" chat ")),
-                    layout[2],
+                    layout[3],
                 );
 
                 // Input prompt.
                 let prompt = format!("> {input}");
                 f.render_widget(
                     Paragraph::new(prompt.clone()).block(Block::default().borders(Borders::ALL).title(" type ")),
-                    layout[3],
+                    layout[4],
                 );
                 // Place the terminal cursor after the prompt + input text.
-                let cursor_x = layout[3].x + 1 + (prompt.chars().count() as u16);
-                let cursor_y = layout[3].y + 1;
+                let cursor_x = layout[4].x + 1 + (prompt.chars().count() as u16);
+                let cursor_y = layout[4].y + 1;
                 f.set_cursor_position(Position::new(cursor_x, cursor_y));
             })?;
         }
@@ -360,6 +419,153 @@ fn update_tones(
         let db = if v > 0.0 { 10.0 * v.log10() } else { DB_FLOOR };
         tones_db[i] += TONE_EMA_ALPHA * (db - tones_db[i]);
     }
+}
+
+/// Build the segment list for a future transmission of `payload`. Mirrors
+/// `Transmitter::encode` so the cursor in the structure panel lines up with
+/// what's actually coming out of the speaker.
+fn compute_segments(payload: &[u8], profile: Profile, variants: DspVariants) -> Vec<Segment> {
+    // Recreate the exact byte layout the transmitter produces: SHA-256 is
+    // appended to the user payload, then the result is chunked into
+    // MAX_PAYLOAD-sized frame payloads.
+    use sha2::{Digest, Sha256};
+    let sha = Sha256::digest(payload);
+    let mut full = Vec::with_capacity(payload.len() + 32);
+    full.extend_from_slice(payload);
+    full.extend_from_slice(&sha);
+    let chunks: Vec<&[u8]> = full.chunks(MAX_PAYLOAD).collect();
+
+    let phy = make_phy(profile, variants);
+    let preamble_len = <FskPhy as Phy>::preamble(&phy).len();
+    let frame_data_samples = phy.frame_data_samples(SYNC_WORD.len() + FRAME_LEN);
+    // Within frame_data_samples (covers SYNC + FRAME), proportional offsets
+    // by byte position.
+    let total_bytes_in_frame = SYNC_WORD.len() + FRAME_LEN;
+    let byte_to_sample = |b: usize| -> usize {
+        // Proportional: bytes are packed into 3-bit symbols then modulated,
+        // but for visualization, linear interpolation is close enough.
+        ((b as f32 / total_bytes_in_frame as f32) * frame_data_samples as f32) as usize
+    };
+
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    for chunk in chunks.iter() {
+        // Preamble
+        out.push(Segment {
+            start_sample: cursor,
+            end_sample: cursor + preamble_len,
+            kind: SegKind::Preamble,
+        });
+        cursor += preamble_len;
+
+        // Within the modulated SYNC+FRAME block.
+        // Byte layout (offsets from start of SYNC):
+        //   0..2:                       SYNC
+        //   2..2+HEADER_LEN(4):         frame header
+        //   2+4..2+4+chunk_len:         user payload (within RS data block)
+        //   2+4+chunk_len..2+4+219:     zero padding
+        //   2+223..2+255:               RS parity (32 bytes)
+        //   2+255..2+259:               CRC32 (4 bytes)
+        let frame_start = cursor;
+        let s_sync = 0;
+        let s_header = SYNC_WORD.len();
+        let s_payload = s_header + HEADER_LEN;
+        let s_padding = s_payload + chunk.len();
+        let s_crc = SYNC_WORD.len() + 255; // RS_DATA + RS_PARITY
+        let s_end = SYNC_WORD.len() + FRAME_LEN; // 261
+
+        // Sync
+        out.push(Segment {
+            start_sample: frame_start + byte_to_sample(s_sync),
+            end_sample: frame_start + byte_to_sample(s_header),
+            kind: SegKind::Sync,
+        });
+        // Header
+        out.push(Segment {
+            start_sample: frame_start + byte_to_sample(s_header),
+            end_sample: frame_start + byte_to_sample(s_payload),
+            kind: SegKind::Header,
+        });
+        // Payload (only if non-empty)
+        if s_padding > s_payload {
+            out.push(Segment {
+                start_sample: frame_start + byte_to_sample(s_payload),
+                end_sample: frame_start + byte_to_sample(s_padding),
+                kind: SegKind::Payload,
+            });
+        }
+        // Padding folded into RS visually since it's zero-padded into the
+        // same RS-protected block — render it as part of RS-parity color so
+        // the user sees one "RS protected" block.
+        // RS parity (covers padding+parity for visual)
+        let rs_visual_start = if s_padding > s_payload { s_padding } else { s_payload };
+        out.push(Segment {
+            start_sample: frame_start + byte_to_sample(rs_visual_start),
+            end_sample: frame_start + byte_to_sample(s_crc),
+            kind: SegKind::RsParity,
+        });
+        // CRC
+        out.push(Segment {
+            start_sample: frame_start + byte_to_sample(s_crc),
+            end_sample: frame_start + byte_to_sample(s_end),
+            kind: SegKind::Crc,
+        });
+
+        cursor += frame_data_samples;
+    }
+    out
+}
+
+/// Render the structure panel as (legend, bar) lines, sized to `width` cells.
+fn render_structure<'a>(
+    cursor: usize,
+    total: usize,
+    segments: &[Segment],
+    width: usize,
+) -> (Line<'a>, Line<'a>) {
+    let total = total.max(1);
+    // Legend (single line of color keys).
+    let legend = Line::from(vec![
+        Span::styled("P", Style::default().fg(SegKind::Preamble.color())),
+        Span::raw("=pream "),
+        Span::styled("S", Style::default().fg(SegKind::Sync.color())),
+        Span::raw("=sync "),
+        Span::styled("H", Style::default().fg(SegKind::Header.color())),
+        Span::raw("=hdr "),
+        Span::styled("D", Style::default().fg(SegKind::Payload.color())),
+        Span::raw("=data "),
+        Span::styled("R", Style::default().fg(SegKind::RsParity.color())),
+        Span::raw("=rs+pad "),
+        Span::styled("C", Style::default().fg(SegKind::Crc.color())),
+        Span::raw("=crc"),
+    ]);
+
+    // Bar: one cell per `total/width` samples; color = covering segment;
+    // glyph = solid if cursor has reached the cell, dim otherwise.
+    let mut spans: Vec<Span<'a>> = Vec::with_capacity(width);
+    for cell in 0..width {
+        let cell_sample = ((cell as f32 / width as f32) * total as f32) as usize;
+        let lit = cell_sample <= cursor;
+        let kind = segment_at(segments, cell_sample);
+        let color = kind.map(|k| k.color()).unwrap_or(Color::DarkGray);
+        let glyph = if lit { "█" } else { "░" };
+        let style = if lit {
+            Style::default().fg(color)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(glyph.to_string(), style));
+    }
+    (legend, Line::from(spans))
+}
+
+fn segment_at(segments: &[Segment], sample: usize) -> Option<SegKind> {
+    for s in segments {
+        if sample >= s.start_sample && sample < s.end_sample {
+            return Some(s.kind);
+        }
+    }
+    None
 }
 
 fn blocks_for(level: f32) -> String {
