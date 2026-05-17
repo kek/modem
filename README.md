@@ -34,6 +34,19 @@ echo "hello modem" | ./target/release/modem tx-wav out.wav
 ./target/release/modem rx-wav out.wav
 ```
 
+## Live visualization
+
+`modem send` and `modem recv` show a ratatui dashboard (tone bars, frame
+timeline, progress) when stdout is a TTY. Pass `--plain` to force the
+historical line-by-line output (used by scripts and CI), or `--tui` to
+force the dashboard when piping.
+
+The Android app shows the same kind of dashboard inline on every Send and
+Receive — tone bars driven by Goertzel filters at the 8 FSK tone
+frequencies, a green/red chip strip for frames, a pulsing "listening"
+indicator while no preamble has been found, and a 10 s watchdog readout
+that triggers once the first frame arrives.
+
 ## Over the air
 
 See [`docs/smoke-test.md`](docs/smoke-test.md) for Mac↔Mac (needs [BlackHole](https://existential.audio/blackhole/) — macOS AEC blocks single-device speaker→mic loopback).

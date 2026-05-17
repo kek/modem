@@ -18,6 +18,11 @@
    ```
 4. Terminal B should print `hello modem` within ~5 seconds of speaker stopping.
 
+> The CLI auto-enables a live ratatui dashboard (tone bars + frame timeline
+> + status) when stdout is a TTY. Pass `--plain` to revert to the
+> line-by-line text output (matches the historical behaviour and is
+> required for scripts that grep stdout).
+
 ## Audible vs ultrasonic
 
 Repeat the above with `--profile ultrasonic` on both sides. Stand within ~1 m
