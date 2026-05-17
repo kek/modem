@@ -193,34 +193,66 @@ mod modulator_tests {
     }
 }
 
-/// Goertzel single-bin magnitude squared for frequency `f` in `samples`.
-fn goertzel_mag2(samples: &[f32], f: f32, sample_rate: u32) -> f32 {
-    let n = samples.len() as f32;
-    let k = (0.5 + n * f / sample_rate as f32).floor();
-    let w = 2.0 * std::f32::consts::PI * k / n;
-    let coeff = 2.0 * w.cos();
-    let (mut s0, mut s1, mut s2) = (0f32, 0f32, 0f32);
-    for &x in samples {
-        s0 = x + coeff * s1 - s2;
-        s2 = s1;
-        s1 = s0;
+/// Tukey (cosine-tapered) window of length `n` with raised-cosine ramps of
+/// fractional width `alpha/2` on each end (alpha ∈ [0, 1]: 0 = rectangular,
+/// 1 = Hann).
+fn tukey_window(n: usize, alpha: f32) -> Vec<f32> {
+    let r = ((alpha * n as f32 / 2.0) as usize).min(n / 2);
+    let mut w = vec![1f32; n];
+    if r == 0 {
+        return w;
     }
-    s1 * s1 + s2 * s2 - coeff * s1 * s2
+    for k in 0..r {
+        let v = 0.5 * (1.0 - (std::f32::consts::PI * k as f32 / r as f32).cos());
+        w[k] = v;
+        w[n - 1 - k] = v;
+    }
+    w
+}
+
+/// Magnitude² of the inner product of `samples` with a windowed complex
+/// exponential at frequency `f`. This is the optimal (matched-filter)
+/// detector for a tone of known shape `window` in additive white Gaussian
+/// noise. A Tukey window de-emphasizes the symbol edges, where over-the-air
+/// transmissions tend to be corrupted by speaker transient nonlinearity at
+/// frequency transitions.
+fn matched_filter_mag2(samples: &[f32], window: &[f32], f: f32, sample_rate: u32) -> f32 {
+    debug_assert_eq!(samples.len(), window.len());
+    let dt = 1.0 / sample_rate as f32;
+    let omega = 2.0 * std::f32::consts::PI * f * dt;
+    let mut c = 0f32;
+    let mut s = 0f32;
+    for (k, (&x, &w)) in samples.iter().zip(window.iter()).enumerate() {
+        let phi = omega * k as f32;
+        let xw = x * w;
+        c += xw * phi.cos();
+        s += xw * phi.sin();
+    }
+    c * c + s * s
 }
 
 /// Demodulate audio samples (assumed symbol-aligned) into a symbol stream.
 /// `samples.len()` must be a multiple of `cfg.symbol_samples`.
+///
+/// Uses a Tukey-windowed matched filter per tone instead of a rectangular
+/// Goertzel: the window de-weights the symbol edges so that transient
+/// speaker nonlinearity at frequency hops doesn't bleed neighbour-tone
+/// energy into the wrong bin.
 pub fn demodulate(cfg: &FskConfig, samples: &[f32]) -> Vec<u8> {
     let n = cfg.symbol_samples;
     assert_eq!(samples.len() % n, 0, "demodulate: not symbol-aligned");
     let n_syms = samples.len() / n;
+    // α=0.5 → 25% raised-cosine taper on each edge of the matched-filter
+    // window. Empirically a good trade between rejecting edge artefacts and
+    // preserving SNR on the flat middle.
+    let window = tukey_window(n, 0.5);
     let mut out = Vec::with_capacity(n_syms);
     for i in 0..n_syms {
         let win = &samples[i * n..(i + 1) * n];
         let mut best_idx = 0usize;
         let mut best_mag = f32::NEG_INFINITY;
         for (t, &f) in cfg.tone_freqs.iter().enumerate() {
-            let m = goertzel_mag2(win, f, cfg.sample_rate);
+            let m = matched_filter_mag2(win, &window, f, cfg.sample_rate);
             if m > best_mag {
                 best_mag = m;
                 best_idx = t;
