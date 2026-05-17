@@ -53,9 +53,11 @@ struct TxInFlight {
     /// Index into the chat log of the matching `Sent` entry, so the renderer
     /// can highlight characters up to the current playback progress.
     log_pos: usize,
-    /// Segmented breakdown of the encoded buffer (preamble / sync / header
-    /// / payload / RS parity / CRC, per frame) for the structure panel.
+    /// Segmented breakdown of the encoded buffer for the structure panel.
     segments: Vec<Segment>,
+    /// True once playback has finished. The panel stays visible so the user
+    /// can inspect the breakdown; the next Enter will replace this state.
+    done: bool,
 }
 
 #[derive(Clone)]
@@ -71,6 +73,7 @@ enum SegKind {
     Sync,
     Header,
     Payload,
+    Padding,
     RsParity,
     Crc,
 }
@@ -82,6 +85,7 @@ impl SegKind {
             SegKind::Sync => Color::Cyan,
             SegKind::Header => Color::Blue,
             SegKind::Payload => Color::Green,
+            SegKind::Padding => Color::Gray,
             SegKind::RsParity => Color::Yellow,
             SegKind::Crc => Color::Red,
         }
@@ -137,8 +141,9 @@ fn run_loop(
     loop {
         // 1) Drain mic into RX decoder + tone-bar feeder (skip tone feed
         //    during TX so the bars don't pick up our own outgoing signal).
+        let tx_active = tx_state.as_ref().map(|t| !t.done).unwrap_or(false);
         while let Ok(chunk) = mic.rx.try_recv() {
-            if tx_state.is_none() {
+            if !tx_active {
                 let events = rx.push_samples(&chunk);
                 for ev in events {
                     match ev {
@@ -168,18 +173,23 @@ fn run_loop(
         //    cursor to wall-clock so the tone bars and char highlighter stay
         //    roughly in sync with what's coming out of the speaker.
         if let Some(t) = tx_state.as_mut() {
-            let elapsed = t.start.elapsed().as_secs_f32();
-            let want = ((elapsed / t.total_sec.max(1e-6)) * t.samples.len() as f32) as usize;
-            let want = want.min(t.samples.len());
-            if want > t.cursor {
-                update_tones(&mut tones_db, &mut rms, &t.samples[t.cursor..want], &freqs, sample_rate);
-                t.cursor = want;
-            }
-            if t.done_rx.try_recv().is_ok() {
-                tx_state = None;
-                // Reset the RX decoder so any residual mic buffer (echo of
-                // our outgoing) doesn't get misinterpreted as a fresh frame.
-                rx = Receiver::new(make_phy(profile, variants));
+            if !t.done {
+                let elapsed = t.start.elapsed().as_secs_f32();
+                let want = ((elapsed / t.total_sec.max(1e-6)) * t.samples.len() as f32) as usize;
+                let want = want.min(t.samples.len());
+                if want > t.cursor {
+                    update_tones(&mut tones_db, &mut rms, &t.samples[t.cursor..want], &freqs, sample_rate);
+                    t.cursor = want;
+                }
+                if t.done_rx.try_recv().is_ok() {
+                    // Playback finished: light up the entire bar, mark done,
+                    // and leave the panel visible for inspection. Reset the
+                    // RX decoder so residual mic buffer (echo of our own
+                    // outgoing) doesn't get misinterpreted as a fresh frame.
+                    t.cursor = t.samples.len();
+                    t.done = true;
+                    rx = Receiver::new(make_phy(profile, variants));
+                }
             }
         }
 
@@ -192,7 +202,8 @@ fn run_loop(
                         KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => break,
                         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break,
                         KeyCode::Enter => {
-                            if !input.is_empty() && tx_state.is_none() {
+                            let can_send = tx_state.as_ref().map(|t| t.done).unwrap_or(true);
+                            if !input.is_empty() && can_send {
                                 let bytes = input.as_bytes().to_vec();
                                 let samples = tx.encode(&bytes);
                                 let total_sec = samples.len() as f32 / sample_rate as f32;
@@ -214,6 +225,7 @@ fn run_loop(
                                     done_rx,
                                     log_pos,
                                     segments,
+                                    done: false,
                                 });
                                 input.clear();
                             }
@@ -234,16 +246,19 @@ fn run_loop(
         let now = Instant::now();
         if now >= next_draw {
             next_draw = now + Duration::from_millis(33);
-            let elapsed_tx = tx_state.as_ref().map(|t| t.start.elapsed().as_secs_f32());
-            let (tx_bytes, tx_total, tx_elapsed) = match tx_state.as_ref() {
-                Some(t) => (Some(t.bytes), Some(t.total_sec), elapsed_tx),
-                None => (None, None, None),
+            let (tx_bytes, tx_total, tx_elapsed, tx_done) = match tx_state.as_ref() {
+                Some(t) => {
+                    let elapsed = t.start.elapsed().as_secs_f32().min(t.total_sec);
+                    (Some(t.bytes), Some(t.total_sec), Some(elapsed), t.done)
+                }
+                None => (None, None, None, false),
             };
             let tx_snapshot = tx_state.as_ref().map(|t| {
                 (
                     t.cursor,
                     t.samples.len(),
                     t.segments.clone(),
+                    t.done,
                 )
             });
             term.draw(|f| {
@@ -267,9 +282,13 @@ fn run_loop(
                     bar_lines.push_str(&format!("{:>5.2}k  {}\n", hz / 1000.0, blocks_for(level)));
                 }
                 let title = match (tx_bytes, tx_total, tx_elapsed) {
-                    (Some(b), Some(t), Some(e)) => format!(
+                    (Some(b), Some(t), Some(e)) if !tx_done => format!(
                         " tones · rms {:.3} · sending {} B {:.1}/{:.1} s ",
                         rms, b, e, t,
+                    ),
+                    (Some(b), Some(t), _) if tx_done => format!(
+                        " tones · rms {:.3} · sent {} B in {:.1} s ",
+                        rms, b, t,
                     ),
                     _ => format!(" tones · rms {:.3} ", rms),
                 };
@@ -278,14 +297,14 @@ fn run_loop(
                     layout[0],
                 );
 
-                // Frame structure panel (only while transmitting).
-                if let Some((cursor, total, segments)) = tx_snapshot.as_ref() {
+                // Frame structure panel (visible during and after TX).
+                if let Some((cursor, total, segments, done)) = tx_snapshot.as_ref() {
                     let inner_w = layout[1].width.saturating_sub(2) as usize;
                     let (legend, bar) = render_structure(*cursor, *total, segments, inner_w);
-                    let lines = vec![legend, bar];
+                    let title = if *done { " frame structure (sent) " } else { " frame structure " };
                     f.render_widget(
-                        Paragraph::new(lines).block(
-                            Block::default().borders(Borders::ALL).title(" frame structure ")
+                        Paragraph::new(vec![legend, bar]).block(
+                            Block::default().borders(Borders::ALL).title(title)
                         ),
                         layout[1],
                     );
@@ -312,9 +331,16 @@ fn run_loop(
                 // Message log (most recent at bottom, scrolling).
                 let log_height = layout[3].height.saturating_sub(2) as usize;
                 let log_start = log.len().saturating_sub(log_height);
-                let in_flight = tx_state.as_ref().map(|t| {
-                    let progress = (t.cursor as f32 / t.samples.len().max(1) as f32).clamp(0.0, 1.0);
-                    (t.log_pos, progress)
+                // Animate the in-flight Sent line's character highlight only
+                // while playback is still progressing. Once done, leave the
+                // line in its normal style.
+                let in_flight = tx_state.as_ref().and_then(|t| {
+                    if t.done {
+                        None
+                    } else {
+                        let progress = (t.cursor as f32 / t.samples.len().max(1) as f32).clamp(0.0, 1.0);
+                        Some((t.log_pos, progress))
+                    }
                 });
                 let lines: Vec<Line> = log
                     .iter()
@@ -494,13 +520,18 @@ fn compute_segments(payload: &[u8], profile: Profile, variants: DspVariants) -> 
                 kind: SegKind::Payload,
             });
         }
-        // Padding folded into RS visually since it's zero-padded into the
-        // same RS-protected block — render it as part of RS-parity color so
-        // the user sees one "RS protected" block.
-        // RS parity (covers padding+parity for visual)
-        let rs_visual_start = if s_padding > s_payload { s_padding } else { s_payload };
+        let s_rs = SYNC_WORD.len() + 223; // RS_DATA = 223
+        // Zero padding (only if chunk shorter than MAX_PAYLOAD)
+        if s_rs > s_padding {
+            out.push(Segment {
+                start_sample: frame_start + byte_to_sample(s_padding),
+                end_sample: frame_start + byte_to_sample(s_rs),
+                kind: SegKind::Padding,
+            });
+        }
+        // RS parity (32 bytes after the data block)
         out.push(Segment {
-            start_sample: frame_start + byte_to_sample(rs_visual_start),
+            start_sample: frame_start + byte_to_sample(s_rs),
             end_sample: frame_start + byte_to_sample(s_crc),
             kind: SegKind::RsParity,
         });
@@ -534,8 +565,10 @@ fn render_structure<'a>(
         Span::raw("=hdr "),
         Span::styled("D", Style::default().fg(SegKind::Payload.color())),
         Span::raw("=data "),
+        Span::styled("░", Style::default().fg(SegKind::Padding.color())),
+        Span::raw("=pad "),
         Span::styled("R", Style::default().fg(SegKind::RsParity.color())),
-        Span::raw("=rs+pad "),
+        Span::raw("=rs "),
         Span::styled("C", Style::default().fg(SegKind::Crc.color())),
         Span::raw("=crc"),
     ]);
