@@ -1,4 +1,5 @@
 use crate::output_format::{is_printable, print_hex};
+use crate::reporter::{Reporter, RxEvent};
 use crate::{make_phy, Profile};
 use modem_audio::input::open_mic;
 use modem_codec::rx::{FrameEvent, Receiver};
@@ -8,12 +9,18 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub fn run(profile: Profile, variants: DspVariants, output: Option<PathBuf>, hex: bool) -> anyhow::Result<()> {
+pub fn run(
+    profile: Profile,
+    variants: DspVariants,
+    output: Option<PathBuf>,
+    hex: bool,
+    reporter: &mut dyn Reporter,
+) -> anyhow::Result<()> {
     let phy = make_phy(profile, variants);
     let mut rx = Receiver::new(phy);
     let mic = open_mic()?;
 
-    eprintln!("listening… (Ctrl-C to stop)");
+    reporter.on_rx(RxEvent::Listening);
 
     let mut last_progress = Instant::now();
     let mut started = false;
@@ -29,23 +36,20 @@ pub fn run(profile: Profile, variants: DspVariants, output: Option<PathBuf>, hex
             }
             Err(e) => return Err(e.into()),
         };
+        reporter.on_rx(RxEvent::Chunk(&chunk));
         let events = rx.push_samples(&chunk);
         for ev in events {
+            reporter.on_rx(RxEvent::Frame(&ev));
             match ev {
-                FrameEvent::FrameOk { seq, bytes } => {
-                    eprintln!("  frame {seq} ok ({} bytes)", bytes.len());
+                FrameEvent::FrameOk { .. } => {
                     started = true;
                     last_progress = Instant::now();
                 }
-                FrameEvent::FrameDropped { seq, reason } => {
-                    eprintln!("  frame {seq} dropped: {reason}");
-                    // Count as progress so we don't give up while frames arrive.
+                FrameEvent::FrameDropped { .. } => {
                     started = true;
                     last_progress = Instant::now();
                 }
-                FrameEvent::StreamComplete { bytes, sha256_ok } => {
-                    eprintln!("✓ {} bytes received, sha256 {}", bytes.len(),
-                        if sha256_ok { "ok" } else { "MISMATCH" });
+                FrameEvent::StreamComplete { bytes, sha256_ok: _ } => {
                     if let Some(p) = &output {
                         fs::write(p, &bytes)?;
                         eprintln!("  wrote {}", p.display());
@@ -61,4 +65,3 @@ pub fn run(profile: Profile, variants: DspVariants, output: Option<PathBuf>, hex
         }
     }
 }
-

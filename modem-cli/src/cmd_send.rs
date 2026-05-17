@@ -1,3 +1,4 @@
+use crate::reporter::{Reporter, TxEvent};
 use crate::{make_phy, Profile};
 use modem_codec::tx::Transmitter;
 use modem_core::fsk::DspVariants;
@@ -5,7 +6,12 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
-pub fn run(profile: Profile, variants: DspVariants, input: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn run(
+    profile: Profile,
+    variants: DspVariants,
+    input: Option<PathBuf>,
+    reporter: &mut dyn Reporter,
+) -> anyhow::Result<()> {
     let bytes = match input {
         Some(p) => fs::read(&p)?,
         None => {
@@ -18,9 +24,12 @@ pub fn run(profile: Profile, variants: DspVariants, input: Option<PathBuf>) -> a
     let ultrasonic = matches!(profile, Profile::Ultrasonic);
     let tx = Transmitter::new(phy, ultrasonic);
     let samples = tx.encode(&bytes);
-    eprintln!("→ {} bytes, {} samples ({:.1}s) over speaker",
-        bytes.len(), samples.len(), samples.len() as f32 / 48_000.0);
+    reporter.on_tx(TxEvent::Starting {
+        bytes: bytes.len(),
+        samples: samples.len(),
+        seconds: samples.len() as f32 / 48_000.0,
+    });
     modem_audio::output::play_samples(samples)?;
-    eprintln!("✓ done");
+    reporter.on_tx(TxEvent::Done);
     Ok(())
 }

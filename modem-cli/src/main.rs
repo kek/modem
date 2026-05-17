@@ -4,6 +4,7 @@ mod cmd_recv;
 mod cmd_tx_wav;
 mod cmd_rank;
 mod output_format;
+mod reporter;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use modem_core::fsk::DspVariants;
@@ -102,8 +103,14 @@ pub enum Profile { Audible, Ultrasonic }
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Send { profile, variants, input } => cmd_send::run(profile, variants.into(), input),
-        Cmd::Recv { profile, variants, output, hex } => cmd_recv::run(profile, variants.into(), output, hex),
+        Cmd::Send { profile, variants, input } => {
+            let mut r = reporter::PlainReporter;
+            cmd_send::run(profile, variants.into(), input, &mut r)
+        }
+        Cmd::Recv { profile, variants, output, hex } => {
+            let mut r = reporter::PlainReporter;
+            cmd_recv::run(profile, variants.into(), output, hex, &mut r)
+        }
         Cmd::TxWav { profile, variants, input, output } => cmd_tx_wav::run(profile, variants.into(), input, output),
         Cmd::RxWav { profile, variants, input, output, hex } => cmd_rx_wav::run(profile, variants.into(), input, output, hex),
         Cmd::Rank { corpus } => cmd_rank::run(corpus),
