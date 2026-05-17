@@ -28,6 +28,10 @@ pub trait Reporter {
     /// Returns a sink that can be told elapsed playback time, when the
     /// reporter supports it (only the TUI variant does).
     fn as_tx_progress_sink(&mut self) -> Option<&mut dyn TxProgressSink> { None }
+
+    /// Did the user ask to quit? Plain reporters always return false (the
+    /// process exits via Ctrl-C). The TUI reporter polls the keyboard.
+    fn should_quit(&mut self) -> bool { false }
 }
 
 pub trait TxProgressSink {

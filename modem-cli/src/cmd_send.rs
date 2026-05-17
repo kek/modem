@@ -54,6 +54,12 @@ pub fn run(
             play_result = Some(r);
             break;
         }
+        if reporter.should_quit() {
+            // User pressed q/Esc; let the playback thread finish naturally
+            // — cancelling CPAL mid-buffer would risk a partial frame on the
+            // wire — but stop ticking the dashboard.
+            break;
+        }
         let end = (i + chunk_samples).min(samples.len());
         if end > i {
             reporter.on_tx(TxEvent::Chunk(&samples[i..end]));

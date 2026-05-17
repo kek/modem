@@ -287,6 +287,10 @@ impl Reporter for TuiReporter {
         Some(self)
     }
 
+    fn should_quit(&mut self) -> bool {
+        TuiReporter::should_quit(self)
+    }
+
     fn on_rx(&mut self, e: RxEvent<'_>) {
         match e {
             RxEvent::Listening => self.draw_rx(),

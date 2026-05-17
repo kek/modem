@@ -25,6 +25,9 @@ pub fn run(
     let mut last_progress = Instant::now();
     let mut started = false;
     loop {
+        if reporter.should_quit() {
+            return Ok(());
+        }
         let chunk = match mic.rx.recv_timeout(Duration::from_millis(500)) {
             Ok(c) => c,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
