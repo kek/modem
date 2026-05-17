@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import se.karleklund.modem.audio.AudioCapture
 import se.karleklund.modem.audio.AudioPlayer
+import se.karleklund.modem.viz.VizEngine
 import uniffi.modem_ffi.DspVariants
 import uniffi.modem_ffi.FfiFrameEvent
 import uniffi.modem_ffi.FfiReceiver
@@ -39,17 +40,27 @@ class ModemViewModel : ViewModel() {
     )
     val variants: StateFlow<DspVariants> = _variants.asStateFlow()
 
+    val viz = VizEngine(toneFreqsFor(_profile.value), sampleRate = 48_000)
+
+    private val _txElapsedSec = MutableStateFlow(0f)
+    val txElapsedSec: StateFlow<Float> = _txElapsedSec.asStateFlow()
+
+    private fun toneFreqsFor(p: Profile): FloatArray = when (p) {
+        Profile.AUDIBLE -> FloatArray(8) { 2000f + it * 200f }
+        Profile.ULTRASONIC -> FloatArray(8) { 17_500f + it * 250f }
+    }
+
     private var receiveJob: Job? = null
     private var sendJob: Job? = null
     private var capture: AudioCapture? = null
 
     fun setProfile(p: Profile) {
-        // If a receive is running with a different profile, stop it so the user
-        // sees Idle and can re-start with the new profile. Send is unaffected.
         if (_profile.value != p) {
             stopReceive()
         }
         _profile.value = p
+        viz.reset()
+        viz.setToneFreqs(toneFreqsFor(p))
     }
 
     fun setVariants(v: DspVariants) {
@@ -62,9 +73,9 @@ class ModemViewModel : ViewModel() {
 
     fun send(text: String) {
         if (sendJob?.isActive == true) return
-        // Stop receive if active — playing audio while listening on the same
-        // device is meaningless and may confuse the user.
         stopReceive()
+        viz.reset()
+        viz.setToneFreqs(toneFreqsFor(_profile.value))
         sendJob = viewModelScope.launch {
             try {
                 val bytes = text.toByteArray(Charsets.UTF_8)
@@ -73,8 +84,26 @@ class ModemViewModel : ViewModel() {
                 val samples = FloatArray(samplesList.size).also { arr ->
                     for (i in samplesList.indices) arr[i] = samplesList[i]
                 }
-                _state.value = UiState.Sending(bytes.size, samples.size / 48_000f)
+                val totalSec = samples.size / 48_000f
+                _state.value = UiState.Sending(bytes.size, totalSec)
+                _txElapsedSec.value = 0f
+                // Feed viz from a coroutine that walks the buffer at wall-clock
+                // rate, so the tone bars animate in sync with playback.
+                val feeder = launch {
+                    val chunkSize = 2400 // 50 ms at 48 kHz
+                    val start = System.currentTimeMillis()
+                    var i = 0
+                    while (isActive && i < samples.size) {
+                        val end = (i + chunkSize).coerceAtMost(samples.size)
+                        viz.pushChunk(samples.copyOfRange(i, end))
+                        i = end
+                        _txElapsedSec.value = (System.currentTimeMillis() - start) / 1000f
+                        kotlinx.coroutines.delay(50L)
+                    }
+                }
                 withContext(Dispatchers.IO) { AudioPlayer.play(samples) }
+                feeder.cancel()
+                _txElapsedSec.value = totalSec
                 _state.value = UiState.Idle
             } catch (t: Throwable) {
                 _state.value = UiState.Error(t.message ?: t.toString())
@@ -84,6 +113,8 @@ class ModemViewModel : ViewModel() {
 
     fun startReceive() {
         if (receiveJob?.isActive == true) return
+        viz.reset()
+        viz.setToneFreqs(toneFreqsFor(_profile.value))
         val rx = FfiReceiver(_profile.value, _variants.value)
         val cap = AudioCapture().also { capture = it; it.start() }
         _state.value = UiState.Receiving(framesOk = 0)
@@ -94,26 +125,30 @@ class ModemViewModel : ViewModel() {
             try {
                 while (isActive) {
                     val chunk = withTimeoutOrNull(500L) { cap.channel.receive() } ?: run {
-                        // No samples this tick; still check watchdog below.
+                        viz.tickWatchdog()
                         null
                     }
                     if (chunk != null) {
+                        viz.pushChunk(chunk)
                         val events = rx.pushSamples(chunk.toList())
-                        for (e in events) when (e) {
-                            is FfiFrameEvent.FrameOk -> {
-                                framesOk++
-                                started = true
-                                lastProgress = System.currentTimeMillis()
-                                _state.value = UiState.Receiving(framesOk)
-                            }
-                            is FfiFrameEvent.FrameDropped -> {
-                                started = true
-                                lastProgress = System.currentTimeMillis()
-                            }
-                            is FfiFrameEvent.StreamComplete -> {
-                                _state.value = UiState.Result(e.bytes, e.sha256Ok)
-                                stopReceiveInternal()
-                                return@launch
+                        for (e in events) {
+                            viz.pushEvent(e)
+                            when (e) {
+                                is FfiFrameEvent.FrameOk -> {
+                                    framesOk++
+                                    started = true
+                                    lastProgress = System.currentTimeMillis()
+                                    _state.value = UiState.Receiving(framesOk)
+                                }
+                                is FfiFrameEvent.FrameDropped -> {
+                                    started = true
+                                    lastProgress = System.currentTimeMillis()
+                                }
+                                is FfiFrameEvent.StreamComplete -> {
+                                    _state.value = UiState.Result(e.bytes, e.sha256Ok)
+                                    stopReceiveInternal()
+                                    return@launch
+                                }
                             }
                         }
                     }

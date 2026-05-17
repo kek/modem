@@ -34,15 +34,20 @@ private const val TONE_EMA_ALPHA = 0.4f
 private const val DB_FLOOR = -80f
 
 class VizEngine(
-    private val toneFreqs: FloatArray,
+    toneFreqs: FloatArray,
     private val sampleRate: Int,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private val _state = MutableStateFlow(VizState())
     val state: StateFlow<VizState> = _state.asStateFlow()
 
+    private var toneFreqsRef: FloatArray = toneFreqs
     private var lastProgressMs: Long = 0L
     private var hasSeenFrame: Boolean = false
+
+    fun setToneFreqs(freqs: FloatArray) {
+        toneFreqsRef = freqs
+    }
 
     fun reset() {
         lastProgressMs = 0L
@@ -52,7 +57,7 @@ class VizEngine(
 
     fun pushChunk(samples: FloatArray) {
         if (samples.isEmpty()) return
-        val mags = goertzelBank(samples, toneFreqs, sampleRate)
+        val mags = goertzelBank(samples, toneFreqsRef, sampleRate)
         // Normalize by chunk length so different chunk sizes are comparable;
         // convert mag² to dB.
         val norm = (samples.size * samples.size).toFloat().coerceAtLeast(1f)
