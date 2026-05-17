@@ -9,7 +9,11 @@ mod tui;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use modem_core::fsk::DspVariants;
+use std::io::IsTerminal;
 use std::path::PathBuf;
+
+use crate::reporter::PlainReporter;
+use crate::tui::TuiReporter;
 
 #[derive(Parser)]
 #[command(name = "modem", version, about = "Acoustic modem CLI")]
@@ -26,6 +30,12 @@ enum Cmd {
         profile: Profile,
         #[command(flatten)]
         variants: VariantArgs,
+        /// Force the ratatui dashboard even when stdout isn't a TTY.
+        #[arg(long, conflicts_with = "plain")]
+        tui: bool,
+        /// Force the plain text reporter (skip the dashboard).
+        #[arg(long, conflicts_with = "tui")]
+        plain: bool,
         /// Input file; if omitted, reads stdin.
         input: Option<PathBuf>,
     },
@@ -41,6 +51,12 @@ enum Cmd {
         /// Print as hex dump instead of raw bytes.
         #[arg(long)]
         hex: bool,
+        /// Force the ratatui dashboard even when stdout isn't a TTY.
+        #[arg(long, conflicts_with = "plain")]
+        tui: bool,
+        /// Force the plain text reporter (skip the dashboard).
+        #[arg(long, conflicts_with = "tui")]
+        plain: bool,
     },
     /// Offline: encode bytes to a WAV file.
     TxWav {
@@ -104,13 +120,25 @@ pub enum Profile { Audible, Ultrasonic }
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Send { profile, variants, input } => {
-            let mut r = reporter::PlainReporter;
-            cmd_send::run(profile, variants.into(), input, &mut r)
+        Cmd::Send { profile, variants, input, tui, plain } => {
+            let want_tui = tui || (!plain && std::io::stdout().is_terminal());
+            if want_tui {
+                let mut r = TuiReporter::new_tx(profile)?;
+                cmd_send::run(profile, variants.into(), input, &mut r)
+            } else {
+                let mut r = PlainReporter;
+                cmd_send::run(profile, variants.into(), input, &mut r)
+            }
         }
-        Cmd::Recv { profile, variants, output, hex } => {
-            let mut r = reporter::PlainReporter;
-            cmd_recv::run(profile, variants.into(), output, hex, &mut r)
+        Cmd::Recv { profile, variants, output, hex, tui, plain } => {
+            let want_tui = tui || (!plain && std::io::stdout().is_terminal());
+            if want_tui {
+                let mut r = TuiReporter::new_rx(profile)?;
+                cmd_recv::run(profile, variants.into(), output, hex, &mut r)
+            } else {
+                let mut r = PlainReporter;
+                cmd_recv::run(profile, variants.into(), output, hex, &mut r)
+            }
         }
         Cmd::TxWav { profile, variants, input, output } => cmd_tx_wav::run(profile, variants.into(), input, output),
         Cmd::RxWav { profile, variants, input, output, hex } => cmd_rx_wav::run(profile, variants.into(), input, output, hex),
