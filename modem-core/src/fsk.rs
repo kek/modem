@@ -208,15 +208,32 @@ fn goertzel_mag2(samples: &[f32], f: f32, sample_rate: u32) -> f32 {
     s1 * s1 + s2 * s2 - coeff * s1 * s2
 }
 
-/// Demodulate audio samples (assumed symbol-aligned) into a symbol stream.
-/// `samples.len()` must be a multiple of `cfg.symbol_samples`.
+/// Demodulate audio samples (assumed symbol-aligned at the first sample)
+/// into a symbol stream.
+///
+/// `samples.len()` must be a multiple of `cfg.symbol_samples`. An early-late
+/// timing tracker continuously adjusts the symbol-window offset by ±1 sample
+/// per symbol whenever the matched-filter energy is asymmetric around the
+/// current centre. This compensates for clock drift between TX and RX
+/// devices (typically ~50 ppm → ~35 samples over a 14 s transmission). Drift
+/// is clamped to ±N/8 samples so the tracker never runs off the end of the
+/// buffer.
 pub fn demodulate(cfg: &FskConfig, samples: &[f32]) -> Vec<u8> {
     let n = cfg.symbol_samples;
     assert_eq!(samples.len() % n, 0, "demodulate: not symbol-aligned");
     let n_syms = samples.len() / n;
+    let buf_len = samples.len() as i32;
+    let n_i = n as i32;
+    let step = (n_i / 16).max(2);          // ±6% probe distance for early/late
+    let max_offset = n_i / 8;              // ±12.5% drift clamp
+    let mut offset: i32 = 0;
     let mut out = Vec::with_capacity(n_syms);
+
     for i in 0..n_syms {
-        let win = &samples[i * n..(i + 1) * n];
+        let nominal = (i as i32) * n_i;
+        let center = (nominal + offset).clamp(0, buf_len - n_i) as usize;
+        let win = &samples[center..center + n];
+
         let mut best_idx = 0usize;
         let mut best_mag = f32::NEG_INFINITY;
         for (t, &f) in cfg.tone_freqs.iter().enumerate() {
@@ -227,6 +244,32 @@ pub fn demodulate(cfg: &FskConfig, samples: &[f32]) -> Vec<u8> {
             }
         }
         out.push(best_idx as u8);
+
+        // Early-late gate on the chosen tone: probe ±step samples around
+        // the current centre and shift the offset toward whichever side
+        // carries more energy. Only act on differences above 10% of the
+        // chosen tone's magnitude to ignore noise-driven jitter.
+        let early_start = nominal + offset - step;
+        let late_start = nominal + offset + step;
+        if early_start >= 0 && late_start + n_i <= buf_len {
+            let f_best = cfg.tone_freqs[best_idx];
+            let early = goertzel_mag2(
+                &samples[early_start as usize..early_start as usize + n],
+                f_best,
+                cfg.sample_rate,
+            );
+            let late = goertzel_mag2(
+                &samples[late_start as usize..late_start as usize + n],
+                f_best,
+                cfg.sample_rate,
+            );
+            let threshold = 0.1 * best_mag;
+            if late > early + threshold && offset < max_offset {
+                offset += 1;
+            } else if early > late + threshold && offset > -max_offset {
+                offset -= 1;
+            }
+        }
     }
     out
 }
