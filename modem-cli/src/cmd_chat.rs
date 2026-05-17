@@ -48,6 +48,9 @@ struct TxInFlight {
     total_sec: f32,
     bytes: usize,
     done_rx: mpsc::Receiver<()>,
+    /// Index into the chat log of the matching `Sent` entry, so the renderer
+    /// can highlight characters up to the current playback progress.
+    log_pos: usize,
 }
 
 pub fn run(profile: Profile, variants: DspVariants) -> anyhow::Result<()> {
@@ -126,12 +129,16 @@ fn run_loop(
             }
         }
 
-        // 2) Advance TX feeder if a transmission is in flight.
+        // 2) Advance TX feeder if a transmission is in flight. Pace the
+        //    cursor to wall-clock so the tone bars and char highlighter stay
+        //    roughly in sync with what's coming out of the speaker.
         if let Some(t) = tx_state.as_mut() {
-            let end = (t.cursor + CHUNK_SAMPLES).min(t.samples.len());
-            if end > t.cursor {
-                update_tones(&mut tones_db, &mut rms, &t.samples[t.cursor..end], &freqs, sample_rate);
-                t.cursor = end;
+            let elapsed = t.start.elapsed().as_secs_f32();
+            let want = ((elapsed / t.total_sec.max(1e-6)) * t.samples.len() as f32) as usize;
+            let want = want.min(t.samples.len());
+            if want > t.cursor {
+                update_tones(&mut tones_db, &mut rms, &t.samples[t.cursor..want], &freqs, sample_rate);
+                t.cursor = want;
             }
             if t.done_rx.try_recv().is_ok() {
                 tx_state = None;
@@ -155,6 +162,7 @@ fn run_loop(
                                 let samples = tx.encode(&bytes);
                                 let total_sec = samples.len() as f32 / sample_rate as f32;
                                 push_log(&mut log, LogEntry::Sent(input.clone()));
+                                let log_pos = log.len() - 1;
                                 let samples_for_play = samples.clone();
                                 let (done_tx, done_rx) = mpsc::channel::<()>();
                                 thread::spawn(move || {
@@ -168,6 +176,7 @@ fn run_loop(
                                     total_sec,
                                     bytes: bytes.len(),
                                     done_rx,
+                                    log_pos,
                                 });
                                 input.clear();
                             }
@@ -244,25 +253,57 @@ fn run_loop(
                 // Message log (most recent at bottom, scrolling).
                 let log_height = layout[2].height.saturating_sub(2) as usize;
                 let log_start = log.len().saturating_sub(log_height);
-                let lines: Vec<Line> = log[log_start..].iter().map(|e| match e {
-                    LogEntry::Sent(t) => Line::from(vec![
-                        Span::styled("→ ", Style::default().fg(Color::Cyan)),
-                        Span::raw(t.clone()),
-                    ]),
-                    LogEntry::Recv { text, sha_ok } => {
-                        let mark = if *sha_ok { "← " } else { "←! " };
-                        let color = if *sha_ok { Color::Green } else { Color::Yellow };
-                        Line::from(vec![
-                            Span::styled(mark, Style::default().fg(color)),
-                            Span::raw(text.clone()),
-                        ])
-                    }
-                    LogEntry::Dropped { seq, reason } => Line::from(vec![
-                        Span::styled(format!("✗ frame {seq} dropped: "), Style::default().fg(Color::Red)),
-                        Span::raw(reason.clone()),
-                    ]),
-                    LogEntry::Info(t) => Line::from(Span::styled(t.clone(), Style::default().fg(Color::DarkGray))),
-                }).collect();
+                let in_flight = tx_state.as_ref().map(|t| {
+                    let progress = (t.cursor as f32 / t.samples.len().max(1) as f32).clamp(0.0, 1.0);
+                    (t.log_pos, progress)
+                });
+                let lines: Vec<Line> = log
+                    .iter()
+                    .enumerate()
+                    .skip(log_start)
+                    .map(|(idx, e)| match e {
+                        LogEntry::Sent(t) => {
+                            let arrow = Span::styled("→ ", Style::default().fg(Color::Cyan));
+                            match in_flight {
+                                Some((pos, progress)) if pos == idx => {
+                                    let chars: Vec<char> = t.chars().collect();
+                                    let n = ((chars.len() as f32) * progress).round() as usize;
+                                    let n = n.min(chars.len());
+                                    let lit: String = chars[..n].iter().collect();
+                                    let dim: String = chars[n..].iter().collect();
+                                    Line::from(vec![
+                                        arrow,
+                                        Span::styled(
+                                            lit,
+                                            Style::default().fg(Color::Black).bg(Color::Cyan),
+                                        ),
+                                        Span::styled(dim, Style::default().fg(Color::DarkGray)),
+                                    ])
+                                }
+                                _ => Line::from(vec![arrow, Span::raw(t.clone())]),
+                            }
+                        }
+                        LogEntry::Recv { text, sha_ok } => {
+                            let mark = if *sha_ok { "← " } else { "←! " };
+                            let color = if *sha_ok { Color::Green } else { Color::Yellow };
+                            Line::from(vec![
+                                Span::styled(mark, Style::default().fg(color)),
+                                Span::raw(text.clone()),
+                            ])
+                        }
+                        LogEntry::Dropped { seq, reason } => Line::from(vec![
+                            Span::styled(
+                                format!("✗ frame {seq} dropped: "),
+                                Style::default().fg(Color::Red),
+                            ),
+                            Span::raw(reason.clone()),
+                        ]),
+                        LogEntry::Info(t) => Line::from(Span::styled(
+                            t.clone(),
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    })
+                    .collect();
                 f.render_widget(
                     Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" chat ")),
                     layout[2],
