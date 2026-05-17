@@ -1,10 +1,11 @@
 use crate::{make_phy, Profile};
 use modem_codec::tx::Transmitter;
+use modem_core::fsk::DspVariants;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
-pub fn run(profile: Profile, input: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn run(profile: Profile, variants: DspVariants, input: Option<PathBuf>) -> anyhow::Result<()> {
     let bytes = match input {
         Some(p) => fs::read(&p)?,
         None => {
@@ -13,7 +14,7 @@ pub fn run(profile: Profile, input: Option<PathBuf>) -> anyhow::Result<()> {
             buf
         }
     };
-    let phy = make_phy(profile);
+    let phy = make_phy(profile, variants);
     let ultrasonic = matches!(profile, Profile::Ultrasonic);
     let tx = Transmitter::new(phy, ultrasonic);
     let samples = tx.encode(&bytes);

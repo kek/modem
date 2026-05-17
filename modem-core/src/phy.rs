@@ -1,6 +1,6 @@
 //! PHY trait + multi-tone FSK implementation.
 
-use crate::fsk::{demodulate, modulate, bytes_to_symbols, symbols_to_bytes, FskConfig, BITS_PER_SYMBOL};
+use crate::fsk::{demodulate, modulate, bytes_to_symbols, symbols_to_bytes, DspVariants, FskConfig, BITS_PER_SYMBOL};
 use crate::preamble::{preamble_samples, detect_preamble};
 
 pub trait Phy {
@@ -21,11 +21,14 @@ pub struct FskPhy {
 }
 
 impl FskPhy {
-    pub fn audible() -> Self {
-        Self { cfg: FskConfig::audible(), preamble: preamble_samples() }
+    pub fn audible() -> Self { Self::audible_with(DspVariants::default()) }
+    pub fn ultrasonic() -> Self { Self::ultrasonic_with(DspVariants::default()) }
+
+    pub fn audible_with(variants: DspVariants) -> Self {
+        Self { cfg: FskConfig::audible_with(variants), preamble: preamble_samples() }
     }
-    pub fn ultrasonic() -> Self {
-        Self { cfg: FskConfig::ultrasonic(), preamble: preamble_samples() }
+    pub fn ultrasonic_with(variants: DspVariants) -> Self {
+        Self { cfg: FskConfig::ultrasonic_with(variants), preamble: preamble_samples() }
     }
     pub fn config(&self) -> &FskConfig { &self.cfg }
 }

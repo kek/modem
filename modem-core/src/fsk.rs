@@ -7,12 +7,50 @@ pub const BITS_PER_SYMBOL: usize = 3;
 /// Fixed sample rate everywhere.
 pub const SAMPLE_RATE: u32 = 48_000;
 
+/// Runtime-selectable DSP variants. All default to OFF, preserving legacy
+/// trunk behaviour. Each flag is documented in `docs/android-smoke-test.md`
+/// under "Suggested follow-up DSP work".
+///
+/// The fields are independent; any subset can be enabled together. The
+/// `modem rank` CLI subcommand sweeps all 8 combinations across a capture
+/// corpus to identify which combination wins over a real channel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DspVariants {
+    /// TX-side raised-cosine envelope on each symbol (`ramp_samples`
+    /// computed as 10% of `symbol_samples` when enabled). Softens the
+    /// speaker drive at every frequency transition.
+    pub pulse_shape: bool,
+    /// RX-side Tukey-windowed matched filter (α=0.5) instead of
+    /// rectangular Goertzel. De-emphasizes corrupted symbol edges.
+    pub matched_filter: bool,
+    /// RX-side early-late timing tracker. Continuously nudges the symbol
+    /// window offset to compensate for clock drift between TX and RX.
+    pub timing_recovery: bool,
+}
+
+impl DspVariants {
+    pub const BASELINE: Self = Self { pulse_shape: false, matched_filter: false, timing_recovery: false };
+    pub const ALL: Self = Self { pulse_shape: true, matched_filter: true, timing_recovery: true };
+
+    /// Short tag like "" for baseline, "p+m" for pulse-shape + matched-filter, etc.
+    /// Used by the rank harness to label result lines.
+    pub fn tag(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.pulse_shape { parts.push("p"); }
+        if self.matched_filter { parts.push("m"); }
+        if self.timing_recovery { parts.push("t"); }
+        if parts.is_empty() { "baseline".into() } else { parts.join("+") }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FskConfig {
     pub sample_rate: u32,
     pub symbol_samples: usize,
     /// 8 distinct frequencies, in Hz.
     pub tone_freqs: [f32; N_TONES],
+    /// DSP variant toggles. Defaults to all-off (legacy behaviour).
+    pub variants: DspVariants,
 }
 
 impl FskConfig {
@@ -30,6 +68,10 @@ impl FskConfig {
     ///
     /// Throughput: ~150 bps raw.
     pub fn audible() -> Self {
+        Self::audible_with(DspVariants::default())
+    }
+
+    pub fn audible_with(variants: DspVariants) -> Self {
         let mut tones = [0f32; N_TONES];
         for i in 0..N_TONES {
             tones[i] = 2000.0 + (i as f32) * 200.0; // 2000..3400
@@ -38,11 +80,16 @@ impl FskConfig {
             sample_rate: SAMPLE_RATE,
             symbol_samples: SAMPLE_RATE as usize / 50, // 20 ms
             tone_freqs: tones,
+            variants,
         }
     }
 
     /// Ultrasonic profile: 8-FSK, 50 sym/s, 250 Hz spacing, 17.5 – 19.25 kHz.
     pub fn ultrasonic() -> Self {
+        Self::ultrasonic_with(DspVariants::default())
+    }
+
+    pub fn ultrasonic_with(variants: DspVariants) -> Self {
         let mut tones = [0f32; N_TONES];
         for i in 0..N_TONES {
             tones[i] = 17_500.0 + (i as f32) * 250.0;
@@ -51,6 +98,7 @@ impl FskConfig {
             sample_rate: SAMPLE_RATE,
             symbol_samples: SAMPLE_RATE as usize / 50, // 20 ms
             tone_freqs: tones,
+            variants,
         }
     }
 }
@@ -100,17 +148,25 @@ pub fn symbols_to_bytes(syms: &[u8], n_bytes: usize) -> Vec<u8> {
 }
 
 /// Modulate a symbol stream into audio samples.
+///
+/// Phase is always continuous across symbols (CPFSK). If
+/// `cfg.variants.pulse_shape` is set, each symbol is additionally weighted
+/// by a Tukey envelope with raised-cosine ramps over 10% of the symbol on
+/// each edge — so the carrier amplitude eases through frequency
+/// transitions instead of switching abruptly.
 pub fn modulate(cfg: &FskConfig, symbols: &[u8]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(symbols.len() * cfg.symbol_samples);
+    let n = cfg.symbol_samples;
+    let r = if cfg.variants.pulse_shape { n / 10 } else { 0 };
+    let mut out = Vec::with_capacity(symbols.len() * n);
     let dt = 1.0 / cfg.sample_rate as f32;
-    // Continuous phase across symbols to avoid clicks.
     let mut phase = 0f32;
     for &s in symbols {
         debug_assert!((s as usize) < N_TONES);
         let f = cfg.tone_freqs[s as usize];
         let dphase = 2.0 * std::f32::consts::PI * f * dt;
-        for _ in 0..cfg.symbol_samples {
-            out.push(phase.sin() * 0.6); // leave headroom
+        for k in 0..n {
+            let env = tukey_edge_envelope(k, n, r);
+            out.push(phase.sin() * 0.6 * env);
             phase += dphase;
             if phase > std::f32::consts::TAU {
                 phase -= std::f32::consts::TAU;
@@ -118,6 +174,23 @@ pub fn modulate(cfg: &FskConfig, symbols: &[u8]) -> Vec<f32> {
         }
     }
     out
+}
+
+/// Envelope at sample `k` of an `n`-sample symbol, with raised-cosine
+/// ramps of length `r` at each edge and flat 1.0 in the middle.
+/// `r == 0` is rectangular.
+fn tukey_edge_envelope(k: usize, n: usize, r: usize) -> f32 {
+    if r == 0 {
+        return 1.0;
+    }
+    if k < r {
+        0.5 * (1.0 - (std::f32::consts::PI * k as f32 / r as f32).cos())
+    } else if k >= n - r {
+        let m = n - 1 - k;
+        0.5 * (1.0 - (std::f32::consts::PI * m as f32 / r as f32).cos())
+    } else {
+        1.0
+    }
 }
 
 #[cfg(test)]
@@ -208,25 +281,121 @@ fn goertzel_mag2(samples: &[f32], f: f32, sample_rate: u32) -> f32 {
     s1 * s1 + s2 * s2 - coeff * s1 * s2
 }
 
-/// Demodulate audio samples (assumed symbol-aligned) into a symbol stream.
-/// `samples.len()` must be a multiple of `cfg.symbol_samples`.
+/// Full-length Tukey window of length `n` with `alpha/2` raised-cosine
+/// fraction on each side (`alpha = 0.5` → 25% taper per edge, 50% flat).
+fn tukey_window(n: usize, alpha: f32) -> Vec<f32> {
+    let r = ((alpha * n as f32 / 2.0) as usize).min(n / 2);
+    let mut w = vec![1f32; n];
+    if r == 0 {
+        return w;
+    }
+    for k in 0..r {
+        let v = 0.5 * (1.0 - (std::f32::consts::PI * k as f32 / r as f32).cos());
+        w[k] = v;
+        w[n - 1 - k] = v;
+    }
+    w
+}
+
+/// Magnitude² of inner product of `samples` with a windowed complex
+/// exponential at `f`. Equivalent to Goertzel when `window` is all-1.0.
+fn matched_filter_mag2(samples: &[f32], window: &[f32], f: f32, sample_rate: u32) -> f32 {
+    debug_assert_eq!(samples.len(), window.len());
+    let dt = 1.0 / sample_rate as f32;
+    let omega = 2.0 * std::f32::consts::PI * f * dt;
+    let mut c = 0f32;
+    let mut s = 0f32;
+    for (k, (&x, &w)) in samples.iter().zip(window.iter()).enumerate() {
+        let phi = omega * k as f32;
+        let xw = x * w;
+        c += xw * phi.cos();
+        s += xw * phi.sin();
+    }
+    c * c + s * s
+}
+
+/// Tone-energy detector at a given offset. Dispatches to Goertzel
+/// (rectangular) or matched filter (Tukey) based on the supplied window.
+fn tone_energy(
+    samples: &[f32],
+    start: usize,
+    n: usize,
+    window: &Option<Vec<f32>>,
+    f: f32,
+    sample_rate: u32,
+) -> f32 {
+    let win = &samples[start..start + n];
+    match window {
+        Some(w) => matched_filter_mag2(win, w, f, sample_rate),
+        None => goertzel_mag2(win, f, sample_rate),
+    }
+}
+
+/// Demodulate audio samples (assumed symbol-aligned at sample 0) into a
+/// symbol stream. `samples.len()` must be a multiple of `cfg.symbol_samples`.
+///
+/// Behaviour depends on `cfg.variants`:
+///   - `matched_filter`: per-tone detector uses a Tukey (α=0.5) window
+///     instead of a rectangular Goertzel.
+///   - `timing_recovery`: an early-late gate adjusts the symbol-window
+///     offset by ±1 sample whenever the chosen tone has asymmetric energy
+///     around the current centre, clamped to ±N/8.
 pub fn demodulate(cfg: &FskConfig, samples: &[f32]) -> Vec<u8> {
     let n = cfg.symbol_samples;
     assert_eq!(samples.len() % n, 0, "demodulate: not symbol-aligned");
     let n_syms = samples.len() / n;
+    let buf_len = samples.len() as i32;
+    let n_i = n as i32;
+    let step = (n_i / 16).max(2);
+    let max_offset = n_i / 8;
+
+    let window = if cfg.variants.matched_filter {
+        Some(tukey_window(n, 0.5))
+    } else {
+        None
+    };
+
+    let mut offset: i32 = 0;
     let mut out = Vec::with_capacity(n_syms);
+
     for i in 0..n_syms {
-        let win = &samples[i * n..(i + 1) * n];
+        let nominal = (i as i32) * n_i;
+        let center = if cfg.variants.timing_recovery {
+            (nominal + offset).clamp(0, buf_len - n_i) as usize
+        } else {
+            nominal as usize
+        };
+
         let mut best_idx = 0usize;
         let mut best_mag = f32::NEG_INFINITY;
         for (t, &f) in cfg.tone_freqs.iter().enumerate() {
-            let m = goertzel_mag2(win, f, cfg.sample_rate);
+            let m = tone_energy(samples, center, n, &window, f, cfg.sample_rate);
             if m > best_mag {
                 best_mag = m;
                 best_idx = t;
             }
         }
         out.push(best_idx as u8);
+
+        if cfg.variants.timing_recovery {
+            let early_start = nominal + offset - step;
+            let late_start = nominal + offset + step;
+            if early_start >= 0 && late_start + n_i <= buf_len {
+                let f_best = cfg.tone_freqs[best_idx];
+                let early = tone_energy(
+                    samples, early_start as usize, n, &window, f_best, cfg.sample_rate,
+                );
+                let late = tone_energy(
+                    samples, late_start as usize, n, &window, f_best, cfg.sample_rate,
+                );
+                let threshold = 0.1 * best_mag;
+                if late > early + threshold && offset < max_offset {
+                    offset += 1;
+                } else if early > late + threshold && offset > -max_offset {
+                    offset -= 1;
+                }
+            }
+        }
     }
     out
 }
@@ -270,5 +439,25 @@ mod demod_tests {
         }
         let back = demodulate(&cfg, &samples);
         assert_eq!(back, syms, "demodulator failed under mild noise");
+    }
+
+    /// Clean-channel roundtrip must work with every variant combination.
+    /// This is the regression net: any future demodulator change that
+    /// breaks one of the 8 cells here will fail this test.
+    #[test]
+    fn all_variant_combinations_roundtrip_clean() {
+        let bytes = b"variant matrix".to_vec();
+        for ps in [false, true] {
+            for mf in [false, true] {
+                for tr in [false, true] {
+                    let variants = DspVariants { pulse_shape: ps, matched_filter: mf, timing_recovery: tr };
+                    let cfg = FskConfig::audible_with(variants);
+                    let syms = bytes_to_symbols(&bytes);
+                    let samples = modulate(&cfg, &syms);
+                    let back_syms = demodulate(&cfg, &samples);
+                    assert_eq!(back_syms, syms, "roundtrip failed for {}", variants.tag());
+                }
+            }
+        }
     }
 }

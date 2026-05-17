@@ -2,13 +2,14 @@ use crate::output_format::{is_printable, print_hex};
 use crate::{make_phy, Profile};
 use modem_audio::input::open_mic;
 use modem_codec::rx::{FrameEvent, Receiver};
+use modem_core::fsk::DspVariants;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub fn run(profile: Profile, output: Option<PathBuf>, hex: bool) -> anyhow::Result<()> {
-    let phy = make_phy(profile);
+pub fn run(profile: Profile, variants: DspVariants, output: Option<PathBuf>, hex: bool) -> anyhow::Result<()> {
+    let phy = make_phy(profile, variants);
     let mut rx = Receiver::new(phy);
     let mic = open_mic()?;
 

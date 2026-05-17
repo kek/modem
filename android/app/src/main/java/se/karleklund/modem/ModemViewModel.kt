@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import se.karleklund.modem.audio.AudioCapture
 import se.karleklund.modem.audio.AudioPlayer
+import uniffi.modem_ffi.DspVariants
 import uniffi.modem_ffi.FfiFrameEvent
 import uniffi.modem_ffi.FfiReceiver
 import uniffi.modem_ffi.FfiTransmitter
@@ -33,6 +34,11 @@ class ModemViewModel : ViewModel() {
     private val _profile = MutableStateFlow(Profile.AUDIBLE)
     val profile: StateFlow<Profile> = _profile.asStateFlow()
 
+    private val _variants = MutableStateFlow(
+        DspVariants(pulseShape = false, matchedFilter = false, timingRecovery = false)
+    )
+    val variants: StateFlow<DspVariants> = _variants.asStateFlow()
+
     private var receiveJob: Job? = null
     private var sendJob: Job? = null
     private var capture: AudioCapture? = null
@@ -46,6 +52,14 @@ class ModemViewModel : ViewModel() {
         _profile.value = p
     }
 
+    fun setVariants(v: DspVariants) {
+        // Stop in-flight receive so the new flags actually apply on next start.
+        if (_variants.value != v) {
+            stopReceive()
+        }
+        _variants.value = v
+    }
+
     fun send(text: String) {
         if (sendJob?.isActive == true) return
         // Stop receive if active — playing audio while listening on the same
@@ -54,7 +68,7 @@ class ModemViewModel : ViewModel() {
         sendJob = viewModelScope.launch {
             try {
                 val bytes = text.toByteArray(Charsets.UTF_8)
-                val tx = FfiTransmitter(_profile.value)
+                val tx = FfiTransmitter(_profile.value, _variants.value)
                 val samplesList = tx.encode(bytes)
                 val samples = FloatArray(samplesList.size).also { arr ->
                     for (i in samplesList.indices) arr[i] = samplesList[i]
@@ -70,7 +84,7 @@ class ModemViewModel : ViewModel() {
 
     fun startReceive() {
         if (receiveJob?.isActive == true) return
-        val rx = FfiReceiver(_profile.value)
+        val rx = FfiReceiver(_profile.value, _variants.value)
         val cap = AudioCapture().also { capture = it; it.start() }
         _state.value = UiState.Receiving(framesOk = 0)
         receiveJob = viewModelScope.launch(Dispatchers.IO) {

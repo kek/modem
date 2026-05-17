@@ -1,0 +1,38 @@
+# Android → Mac corpus. file-name encodes the TX side config and capture volume
+# so the rank harness output groups naturally when sorted.
+
+[[capture]]
+file = "android-to-mac-001.wav"
+expected = "hello from Android"
+direction = "android-to-mac-tx-base-vol22"
+profile = "audible"
+
+[[capture]]
+file = "android-to-mac-002-tx-pulse.wav"
+expected = "hello from Android"
+direction = "android-to-mac-tx-pulse-vol25"
+profile = "audible"
+
+[[capture]]
+file = "android-to-mac-003-tx-base-vol25.wav"
+expected = "hello from Android"
+direction = "android-to-mac-tx-base-vol25"
+profile = "audible"
+
+[[capture]]
+file = "android-to-mac-004-tx-base-vol25.wav"
+expected = "hello from Android"
+direction = "android-to-mac-tx-base-vol25"
+profile = "audible"
+
+[[capture]]
+file = "android-to-mac-005-tx-pulse-vol25.wav"
+expected = "hello from Android"
+direction = "android-to-mac-tx-pulse-vol25"
+profile = "audible"
+
+[[capture]]
+file = "android-to-mac-006-tx-pulse-vol25.wav"
+expected = "hello from Android"
+direction = "android-to-mac-tx-pulse-vol25"
+profile = "audible"
