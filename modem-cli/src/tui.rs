@@ -272,7 +272,17 @@ impl Drop for TuiReporter {
     }
 }
 
+impl crate::reporter::TxProgressSink for TuiReporter {
+    fn set_tx_progress(&mut self, elapsed_sec: f32) {
+        TuiReporter::set_tx_progress(self, elapsed_sec);
+    }
+}
+
 impl Reporter for TuiReporter {
+    fn as_tx_progress_sink(&mut self) -> Option<&mut dyn crate::reporter::TxProgressSink> {
+        Some(self)
+    }
+
     fn on_rx(&mut self, e: RxEvent<'_>) {
         match e {
             RxEvent::Listening => self.draw_rx(),

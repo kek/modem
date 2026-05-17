@@ -22,6 +22,14 @@ pub enum TxEvent<'a> {
 pub trait Reporter {
     fn on_rx(&mut self, _e: RxEvent<'_>) {}
     fn on_tx(&mut self, _e: TxEvent<'_>) {}
+
+    /// Returns a sink that can be told elapsed playback time, when the
+    /// reporter supports it (only the TUI variant does).
+    fn as_tx_progress_sink(&mut self) -> Option<&mut dyn TxProgressSink> { None }
+}
+
+pub trait TxProgressSink {
+    fn set_tx_progress(&mut self, elapsed_sec: f32);
 }
 
 /// Drop-in for the historical eprintln-based output.
