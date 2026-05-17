@@ -55,6 +55,10 @@ struct TxInFlight {
     log_pos: usize,
     /// Segmented breakdown of the encoded buffer for the structure panel.
     segments: Vec<Segment>,
+    /// Sample range during which the user-typed bytes are on the wire.
+    /// Used to map cursor → highlighted character count so the chat-log
+    /// highlight tracks the actual data segment instead of overall wall time.
+    user_range: (usize, usize),
     /// True once playback has finished. The panel stays visible so the user
     /// can inspect the breakdown; the next Enter will replace this state.
     done: bool,
@@ -73,6 +77,7 @@ enum SegKind {
     Sync,
     Header,
     Payload,
+    Sha,
     Padding,
     RsParity,
     Crc,
@@ -85,6 +90,7 @@ impl SegKind {
             SegKind::Sync => Color::Cyan,
             SegKind::Header => Color::Blue,
             SegKind::Payload => Color::Green,
+            SegKind::Sha => Color::LightBlue,
             SegKind::Padding => Color::Gray,
             SegKind::RsParity => Color::Yellow,
             SegKind::Crc => Color::Red,
@@ -207,7 +213,7 @@ fn run_loop(
                                 let bytes = input.as_bytes().to_vec();
                                 let samples = tx.encode(&bytes);
                                 let total_sec = samples.len() as f32 / sample_rate as f32;
-                                let segments = compute_segments(&bytes, profile, variants);
+                                let (segments, user_range) = compute_segments(&bytes, profile, variants);
                                 push_log(&mut log, LogEntry::Sent(input.clone()));
                                 let log_pos = log.len() - 1;
                                 let samples_for_play = samples.clone();
@@ -225,6 +231,7 @@ fn run_loop(
                                     done_rx,
                                     log_pos,
                                     segments,
+                                    user_range,
                                     done: false,
                                 });
                                 input.clear();
@@ -332,15 +339,21 @@ fn run_loop(
                 let log_height = layout[3].height.saturating_sub(2) as usize;
                 let log_start = log.len().saturating_sub(log_height);
                 // Animate the in-flight Sent line's character highlight only
-                // while playback is still progressing. Once done, leave the
-                // line in its normal style.
+                // while playback is still progressing. Map cursor to chars
+                // through the *user-payload sample range* so the highlight
+                // moves in lockstep with the green data segments (not the
+                // surrounding preamble / sync / SHA / padding / RS / CRC).
                 let in_flight = tx_state.as_ref().and_then(|t| {
                     if t.done {
-                        None
-                    } else {
-                        let progress = (t.cursor as f32 / t.samples.len().max(1) as f32).clamp(0.0, 1.0);
-                        Some((t.log_pos, progress))
+                        return None;
                     }
+                    let (a, b) = t.user_range;
+                    let progress = if b > a {
+                        ((t.cursor as f32 - a as f32) / (b - a) as f32).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    Some((t.log_pos, progress))
                 });
                 let lines: Vec<Line> = log
                     .iter()
@@ -447,35 +460,46 @@ fn update_tones(
     }
 }
 
-/// Build the segment list for a future transmission of `payload`. Mirrors
-/// `Transmitter::encode` so the cursor in the structure panel lines up with
-/// what's actually coming out of the speaker.
-fn compute_segments(payload: &[u8], profile: Profile, variants: DspVariants) -> Vec<Segment> {
-    // Recreate the exact byte layout the transmitter produces: SHA-256 is
-    // appended to the user payload, then the result is chunked into
-    // MAX_PAYLOAD-sized frame payloads.
+/// Build the segment list + user-payload sample range for a future
+/// transmission. Mirrors `Transmitter::encode` so the cursor in the
+/// structure panel lines up with what's actually coming out of the speaker.
+///
+/// The user-payload sample range spans only the frame regions carrying
+/// user bytes — excluding the appended SHA-256 hash, padding, parity and
+/// CRC — so the chat-log character highlighter advances at the same pace
+/// as the green segments in the panel.
+fn compute_segments(
+    payload: &[u8],
+    profile: Profile,
+    variants: DspVariants,
+) -> (Vec<Segment>, (usize, usize)) {
+    // The transmitter appends a SHA-256 to the user payload then chunks the
+    // result into MAX_PAYLOAD-sized frame payloads. Walk that layout so we
+    // can colour user bytes (green) separately from the SHA tail (light
+    // blue).
     use sha2::{Digest, Sha256};
-    let sha = Sha256::digest(payload);
-    let mut full = Vec::with_capacity(payload.len() + 32);
-    full.extend_from_slice(payload);
-    full.extend_from_slice(&sha);
-    let chunks: Vec<&[u8]> = full.chunks(MAX_PAYLOAD).collect();
+    let _sha = Sha256::digest(payload); // we only need its length (32)
+    let user_len = payload.len();
+    let sha_len = 32usize;
+    let full_len = user_len + sha_len;
 
     let phy = make_phy(profile, variants);
     let preamble_len = <FskPhy as Phy>::preamble(&phy).len();
     let frame_data_samples = phy.frame_data_samples(SYNC_WORD.len() + FRAME_LEN);
-    // Within frame_data_samples (covers SYNC + FRAME), proportional offsets
-    // by byte position.
     let total_bytes_in_frame = SYNC_WORD.len() + FRAME_LEN;
     let byte_to_sample = |b: usize| -> usize {
-        // Proportional: bytes are packed into 3-bit symbols then modulated,
-        // but for visualization, linear interpolation is close enough.
         ((b as f32 / total_bytes_in_frame as f32) * frame_data_samples as f32) as usize
     };
 
     let mut out = Vec::new();
     let mut cursor = 0usize;
-    for chunk in chunks.iter() {
+    let mut consumed = 0usize; // bytes of `full` (payload+sha) emitted so far
+    let mut user_start: Option<usize> = None;
+    let mut user_end: Option<usize> = None;
+    let mut chunk_starts = 0usize;
+    while chunk_starts < full_len {
+        let chunk_len = (full_len - chunk_starts).min(MAX_PAYLOAD);
+
         // Preamble
         out.push(Segment {
             start_sample: cursor,
@@ -484,11 +508,11 @@ fn compute_segments(payload: &[u8], profile: Profile, variants: DspVariants) -> 
         });
         cursor += preamble_len;
 
-        // Within the modulated SYNC+FRAME block.
-        // Byte layout (offsets from start of SYNC):
+        // Within the modulated SYNC+FRAME block (byte offsets from start of
+        // the sync word):
         //   0..2:                       SYNC
         //   2..2+HEADER_LEN(4):         frame header
-        //   2+4..2+4+chunk_len:         user payload (within RS data block)
+        //   2+4..2+4+chunk_len:         frame payload (= user bytes + SHA tail)
         //   2+4+chunk_len..2+4+219:     zero padding
         //   2+223..2+255:               RS parity (32 bytes)
         //   2+255..2+259:               CRC32 (4 bytes)
@@ -496,32 +520,58 @@ fn compute_segments(payload: &[u8], profile: Profile, variants: DspVariants) -> 
         let s_sync = 0;
         let s_header = SYNC_WORD.len();
         let s_payload = s_header + HEADER_LEN;
-        let s_padding = s_payload + chunk.len();
-        let s_crc = SYNC_WORD.len() + 255; // RS_DATA + RS_PARITY
-        let s_end = SYNC_WORD.len() + FRAME_LEN; // 261
+        let s_padding = s_payload + chunk_len;
+        let s_rs = SYNC_WORD.len() + 223;
+        let s_crc = SYNC_WORD.len() + 255;
+        let s_end = SYNC_WORD.len() + FRAME_LEN;
 
-        // Sync
+        // Sync, header
         out.push(Segment {
             start_sample: frame_start + byte_to_sample(s_sync),
             end_sample: frame_start + byte_to_sample(s_header),
             kind: SegKind::Sync,
         });
-        // Header
         out.push(Segment {
             start_sample: frame_start + byte_to_sample(s_header),
             end_sample: frame_start + byte_to_sample(s_payload),
             kind: SegKind::Header,
         });
-        // Payload (only if non-empty)
-        if s_padding > s_payload {
+
+        // The payload region of this chunk may carry user bytes, SHA bytes,
+        // or both. Split it accordingly.
+        let user_in_chunk = if consumed < user_len {
+            (user_len - consumed).min(chunk_len)
+        } else {
+            0
+        };
+        let sha_in_chunk = chunk_len - user_in_chunk;
+
+        if user_in_chunk > 0 {
+            let s0 = s_payload;
+            let s1 = s_payload + user_in_chunk;
+            let a = frame_start + byte_to_sample(s0);
+            let b = frame_start + byte_to_sample(s1);
             out.push(Segment {
-                start_sample: frame_start + byte_to_sample(s_payload),
-                end_sample: frame_start + byte_to_sample(s_padding),
+                start_sample: a,
+                end_sample: b,
                 kind: SegKind::Payload,
             });
+            if user_start.is_none() {
+                user_start = Some(a);
+            }
+            user_end = Some(b);
         }
-        let s_rs = SYNC_WORD.len() + 223; // RS_DATA = 223
-        // Zero padding (only if chunk shorter than MAX_PAYLOAD)
+        if sha_in_chunk > 0 {
+            let s0 = s_payload + user_in_chunk;
+            let s1 = s_padding;
+            out.push(Segment {
+                start_sample: frame_start + byte_to_sample(s0),
+                end_sample: frame_start + byte_to_sample(s1),
+                kind: SegKind::Sha,
+            });
+        }
+
+        // Padding (only if chunk shorter than MAX_PAYLOAD)
         if s_rs > s_padding {
             out.push(Segment {
                 start_sample: frame_start + byte_to_sample(s_padding),
@@ -529,13 +579,11 @@ fn compute_segments(payload: &[u8], profile: Profile, variants: DspVariants) -> 
                 kind: SegKind::Padding,
             });
         }
-        // RS parity (32 bytes after the data block)
         out.push(Segment {
             start_sample: frame_start + byte_to_sample(s_rs),
             end_sample: frame_start + byte_to_sample(s_crc),
             kind: SegKind::RsParity,
         });
-        // CRC
         out.push(Segment {
             start_sample: frame_start + byte_to_sample(s_crc),
             end_sample: frame_start + byte_to_sample(s_end),
@@ -543,8 +591,12 @@ fn compute_segments(payload: &[u8], profile: Profile, variants: DspVariants) -> 
         });
 
         cursor += frame_data_samples;
+        consumed += chunk_len;
+        chunk_starts += chunk_len;
     }
-    out
+
+    let range = (user_start.unwrap_or(0), user_end.unwrap_or(0));
+    (out, range)
 }
 
 /// Render the structure panel as (legend, bar) lines, sized to `width` cells.
@@ -565,6 +617,8 @@ fn render_structure<'a>(
         Span::raw("=hdr "),
         Span::styled("D", Style::default().fg(SegKind::Payload.color())),
         Span::raw("=data "),
+        Span::styled("#", Style::default().fg(SegKind::Sha.color())),
+        Span::raw("=sha "),
         Span::styled("░", Style::default().fg(SegKind::Padding.color())),
         Span::raw("=pad "),
         Span::styled("R", Style::default().fg(SegKind::RsParity.color())),
