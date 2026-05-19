@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>modem (web POC)</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>modem · web POC</h1>
+      <p class="sub">Pure-Rust 8-FSK acoustic modem, compiled to WebAssembly, driving the Web Audio API.</p>
+    </header>
+
+    <section class="controls">
+      <fieldset>
+        <legend>Profile</legend>
+        <label><input type="radio" name="profile" value="audible" checked> audible (2.0–3.4 kHz)</label>
+        <label><input type="radio" name="profile" value="ultrasonic"> ultrasonic (17.5–19.25 kHz)</label>
+      </fieldset>
+    </section>
+
+    <section class="send">
+      <h2>send</h2>
+      <input id="msg" type="text" placeholder="Type a message…" value="hello from the web" autocomplete="off" />
+      <button id="send-btn">Send</button>
+    </section>
+
+    <section class="recv">
+      <h2>listen</h2>
+      <button id="listen-btn">Start listening</button>
+      <span id="mic-status" class="muted">mic idle</span>
+    </section>
+
+    <section class="viz">
+      <h2>tones</h2>
+      <canvas id="tones" width="640" height="160"></canvas>
+      <div id="freq-labels" class="freq-labels"></div>
+    </section>
+
+    <section class="log">
+      <h2>messages</h2>
+      <div id="log"></div>
+    </section>
+
+    <footer>
+      <span id="status" class="muted">loading wasm…</span>
+    </footer>
+  </main>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

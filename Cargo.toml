@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["modem-core", "modem-codec", "modem-audio", "modem-cli", "modem-ffi", "uniffi-bindgen"]
+members = ["modem-core", "modem-codec", "modem-audio", "modem-cli", "modem-ffi", "modem-wasm", "uniffi-bindgen"]
 
 [workspace.package]
 edition = "2021"
