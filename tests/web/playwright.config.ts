@@ -5,6 +5,7 @@ export default defineConfig({
   fullyParallel: false, // audio devices don't enjoy contention
   workers: 1,
   reporter: [["list"]],
+  globalSetup: "./fixtures/global-setup.mjs",
   use: {
     baseURL: "http://localhost:8765",
     trace: "on-first-retry",
