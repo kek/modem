@@ -2,6 +2,8 @@
 
 An acoustic modem. Sends bytes through the air as audio (or through a WAV file) and decodes them back. Pure software — uses whatever speaker and microphone are attached.
 
+**Try it in your browser:** <https://kek.github.io/modem/> — the same Rust DSP compiled to WebAssembly, driving Web Audio for capture + playback. Works on Chrome/Firefox/recent Safari. Pick a profile, type something, hit Send — or hit Start listening on a second device to receive.
+
 Two profiles:
 - **audible** — 8-FSK in 2.0–3.4 kHz, sounds like an R2-D2 warble. ~150 bps.
 - **ultrasonic** — same scheme shifted above ~17 kHz. Silent to most humans, range limited by speaker rolloff.
