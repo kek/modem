@@ -1,5 +1,7 @@
 # modem · web POC
 
+**Live demo:** <https://kek.github.io/modem/> (deployed from `trunk` by `.github/workflows/deploy-pages.yml`).
+
 A browser page that uses the same `modem-core` / `modem-codec` crates as the
 CLI and Android app, compiled to WebAssembly via `wasm-bindgen`. JavaScript
 owns audio I/O through the Web Audio API; the wasm module owns the DSP.

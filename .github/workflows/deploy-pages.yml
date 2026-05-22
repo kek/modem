@@ -1,0 +1,79 @@
+# Build the wasm + JS bundle for web/ and deploy to GitHub Pages.
+# After the first successful run, enable the source at
+#   Settings → Pages → Build and deployment → Source: GitHub Actions
+# The demo lands at https://kek.github.io/modem/.
+
+name: deploy-pages
+
+on:
+  push:
+    branches: [trunk]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A single in-flight + one queued deploy; cancel queued if a new push lands.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + wasm32 target
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup target add wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Cache cargo registry + git + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Cache wasm-bindgen-cli binary
+        id: wbg-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-cli-0.2.121-${{ runner.os }}
+
+      - name: Install wasm-bindgen-cli (if not cached)
+        if: steps.wbg-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.121
+
+      - name: Build wasm bundle
+        run: ./scripts/build-wasm.sh
+
+      - name: Verify artifact
+        run: |
+          test -f web/pkg/modem_wasm.js
+          test -f web/pkg/modem_wasm_bg.wasm
+          ls -lh web/pkg
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
