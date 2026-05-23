@@ -106,20 +106,37 @@ function scheduleDraw() {
   });
 }
 
-async function ensureCtx() {
-  if (state.ctx) return state.ctx;
-  els.status.textContent = "starting audio…";
-  state.ctx = new AudioContext({ sampleRate: TARGET_SR });
-  if (state.ctx.sampleRate !== TARGET_SR) {
-    log(
-      `⚠ AudioContext returned ${state.ctx.sampleRate} Hz instead of ${TARGET_SR} Hz — ` +
-        `decode may misalign on this device.`,
-      "log-info",
-    );
+// iOS Safari requires AudioContext creation and .resume() to happen
+// synchronously within the user-gesture handler — any await before them
+// breaks the gesture chain and iOS silently blocks audio output.
+// Call this at the very start of every click/keydown handler (no await).
+function unlockCtx() {
+  if (!state.ctx) {
+    state.ctx = new AudioContext({ sampleRate: TARGET_SR });
   }
-  await state.ctx.audioWorklet.addModule("./worklet.js");
-  state.workletReady = true;
-  els.status.textContent = `audio ready @ ${state.ctx.sampleRate} Hz`;
+  // Intentionally not awaited: the synchronous call is what unlocks iOS.
+  // ensureCtx / send / startListen will await the settled state later.
+  state.ctx.resume();
+}
+
+async function ensureCtx() {
+  if (!state.ctx) {
+    els.status.textContent = "starting audio…";
+    state.ctx = new AudioContext({ sampleRate: TARGET_SR });
+    if (state.ctx.sampleRate !== TARGET_SR) {
+      log(
+        `⚠ AudioContext returned ${state.ctx.sampleRate} Hz instead of ${TARGET_SR} Hz — ` +
+          `decode may misalign on this device.`,
+        "log-info",
+      );
+    }
+  }
+  if (!state.workletReady) {
+    els.status.textContent = "starting audio…";
+    await state.ctx.audioWorklet.addModule("./worklet.js");
+    state.workletReady = true;
+    els.status.textContent = `audio ready @ ${state.ctx.sampleRate} Hz`;
+  }
   return state.ctx;
 }
 
@@ -134,7 +151,7 @@ async function send() {
   const samples = tx.encode(new TextEncoder().encode(text));
 
   const buf = state.ctx.createBuffer(1, samples.length, TARGET_SR);
-  buf.copyToChannel(samples, 0);
+  buf.getChannelData(0).set(samples); // copyToChannel has patchy Safari support
   const src = state.ctx.createBufferSource();
   src.buffer = buf;
   src.connect(state.ctx.destination);
@@ -269,11 +286,12 @@ async function main() {
   refreshFreqLabels();
   drawTones();
 
-  els.send.addEventListener("click", send);
+  els.send.addEventListener("click", () => { unlockCtx(); send(); });
   els.msg.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") send();
+    if (e.key === "Enter") { unlockCtx(); send(); }
   });
   els.listen.addEventListener("click", () => {
+    unlockCtx();
     if (state.listening) stopListen(); else startListen();
   });
   document.querySelectorAll('input[name="profile"]').forEach((r) => {
