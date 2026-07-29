@@ -19,23 +19,30 @@
 //! expected = "hello from android"     # OR expected_hex = "deadbeef"
 //! direction = "android-to-mac"         # free-form label
 //! profile = "audible"                  # "audible" | "ultrasonic"
+//! symbol_rate = 50                     # optional, defaults to 50 sym/s
 //! ```
+//!
+//! `symbol_rate` is a property of the recording, not a knob the harness can
+//! sweep: the sender chose it when it put the signal in the air, exactly like
+//! the profile and the `p` pulse-shaping flag. Decoding at the wrong rate
+//! yields garbage, so it has to be declared per capture.
 //!
 //! Output (one line per cell):
 //! ```text
-//! capture=foo.wav variant=baseline outcome=no_preamble
-//! capture=foo.wav variant=p+m outcome=ok
+//! capture=foo.wav direction=android-to-mac rate=50 variant=baseline outcome=crc_fail
+//! capture=foo.wav direction=android-to-mac rate=50 variant=p+m outcome=ok
 //! ```
 //!
-//! Followed by per-variant aggregates:
+//! Followed by aggregates, one per (symbol rate × variant) — a corpus may mix
+//! rates, and averaging across them would be meaningless:
 //! ```text
-//! SUMMARY variant=baseline ok=0/20 no_preamble=8 sync_fail=4 rs_fail=8 sha_mismatch=0
+//! SUMMARY rate=50 variant=baseline ok=0/20 no_preamble=8 sync_fail=4 rs_fail=8
 //! ```
 
 use crate::Profile;
 use hound::WavReader;
 use modem_codec::rx::{FrameEvent, Receiver};
-use modem_core::fsk::DspVariants;
+use modem_core::fsk::{DspVariants, DEFAULT_SYMBOL_RATE};
 use modem_core::phy::FskPhy;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -55,6 +62,8 @@ struct CaptureEntry {
     #[serde(default)]
     direction: String,
     profile: String,
+    /// Symbols/second the sender used. Omitted means the historical 50.
+    symbol_rate: Option<u32>,
 }
 
 impl CaptureEntry {
@@ -107,6 +116,8 @@ enum Outcome {
     NoPreamble,
     SyncFail,
     RsFail,
+    CrcFail,
+    FrameFail,
     ShaMismatch,
     WrongBytes,
 }
@@ -118,6 +129,8 @@ impl Outcome {
             Outcome::NoPreamble => "no_preamble",
             Outcome::SyncFail => "sync_fail",
             Outcome::RsFail => "rs_fail",
+            Outcome::CrcFail => "crc_fail",
+            Outcome::FrameFail => "frame_fail",
             Outcome::ShaMismatch => "sha_mismatch",
             Outcome::WrongBytes => "wrong_bytes",
         }
@@ -127,6 +140,7 @@ impl Outcome {
 fn classify(events: &[FrameEvent], expected: &[u8]) -> Outcome {
     let mut saw_drop_sync = false;
     let mut saw_drop_rs = false;
+    let mut saw_drop_crc = false;
     let mut saw_any_frame = false;
     for ev in events {
         match ev {
@@ -137,6 +151,8 @@ fn classify(events: &[FrameEvent], expected: &[u8]) -> Outcome {
                     saw_drop_sync = true;
                 } else if reason.contains("RS") || reason.contains("Rs") {
                     saw_drop_rs = true;
+                } else if reason.contains("CRC") {
+                    saw_drop_crc = true;
                 }
             }
             FrameEvent::StreamComplete { bytes, sha256_ok } => {
@@ -150,21 +166,31 @@ fn classify(events: &[FrameEvent], expected: &[u8]) -> Outcome {
             }
         }
     }
+    // A capture whose preamble was never found produces no events at all —
+    // that, and only that, is `no_preamble`. Anything that emitted a frame
+    // event failed *after* the chirp locked. `crc_fail` and `frame_fail`
+    // exist because those cells used to fall through to `no_preamble`, which
+    // buried exactly the distinction that matters most for Android→Mac: the
+    // preamble locks, and it is the body that breaks.
     if !saw_any_frame {
         Outcome::NoPreamble
     } else if saw_drop_rs {
         Outcome::RsFail
     } else if saw_drop_sync {
         Outcome::SyncFail
+    } else if saw_drop_crc {
+        Outcome::CrcFail
     } else {
-        Outcome::NoPreamble
+        // A frame event happened but the stream never completed: dropped for
+        // some other framing reason, or the last frame never arrived.
+        Outcome::FrameFail
     }
 }
 
-fn make_phy(profile: Profile, variants: DspVariants) -> FskPhy {
+fn make_phy(profile: Profile, symbol_rate: u32, variants: DspVariants) -> FskPhy {
     match profile {
-        Profile::Audible => FskPhy::audible_with(variants),
-        Profile::Ultrasonic => FskPhy::ultrasonic_with(variants),
+        Profile::Audible => FskPhy::audible_at(symbol_rate, variants),
+        Profile::Ultrasonic => FskPhy::ultrasonic_at(symbol_rate, variants),
     }
 }
 
@@ -186,8 +212,8 @@ pub fn run(corpus: PathBuf) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("read {}: {}", manifest_path.display(), e))?;
     let manifest: Manifest = toml::from_str(&manifest_text)?;
 
-    // tally[variant.tag()] = (ok_count, total_count, per-outcome counts)
-    let mut tally: BTreeMap<String, BTreeMap<&'static str, usize>> = BTreeMap::new();
+    // tally[(symbol_rate, variant.tag())] = per-outcome counts
+    let mut tally: BTreeMap<(u32, String), BTreeMap<&'static str, usize>> = BTreeMap::new();
 
     for entry in &manifest.capture {
         let wav_path = corpus.join(&entry.file);
@@ -195,26 +221,28 @@ pub fn run(corpus: PathBuf) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("load {}: {}", wav_path.display(), e))?;
         let expected = entry.expected_bytes()?;
         let profile = entry.profile()?;
+        let symbol_rate = entry.symbol_rate.unwrap_or(DEFAULT_SYMBOL_RATE);
         for variants in all_variants() {
-            let phy = make_phy(profile, variants);
+            let phy = make_phy(profile, symbol_rate, variants);
             let mut rx = Receiver::new(phy);
             let events = rx.push_samples(&samples);
             let outcome = classify(&events, &expected);
             println!(
-                "capture={} direction={} variant={} outcome={}",
+                "capture={} direction={} rate={} variant={} outcome={}",
                 entry.file,
                 if entry.direction.is_empty() { "?" } else { entry.direction.as_str() },
+                symbol_rate,
                 variants.tag(),
                 outcome.tag(),
             );
-            let bucket = tally.entry(variants.tag()).or_default();
+            let bucket = tally.entry((symbol_rate, variants.tag())).or_default();
             *bucket.entry(outcome.tag()).or_insert(0) += 1;
             *bucket.entry("__total").or_insert(0) += 1;
         }
     }
 
     println!();
-    for (variant, counts) in &tally {
+    for ((rate, variant), counts) in &tally {
         let total = counts.get("__total").copied().unwrap_or(0);
         let ok = counts.get("ok").copied().unwrap_or(0);
         let mut detail = String::new();
@@ -222,7 +250,7 @@ pub fn run(corpus: PathBuf) -> anyhow::Result<()> {
             if k.starts_with("__") || *k == "ok" { continue; }
             detail.push_str(&format!(" {k}={v}"));
         }
-        println!("SUMMARY variant={variant} ok={ok}/{total}{detail}");
+        println!("SUMMARY rate={rate} variant={variant} ok={ok}/{total}{detail}");
     }
 
     Ok(())

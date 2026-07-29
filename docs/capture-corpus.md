@@ -6,9 +6,12 @@ followed by per-variant aggregates. Designed to be driven by an agent — no
 human eyeballing required.
 
 ```text
-SUMMARY variant=baseline   ok=0/20 no_preamble=8 sync_fail=4 rs_fail=8
-SUMMARY variant=p+m+t      ok=15/20 rs_fail=3 sync_fail=2
+SUMMARY rate=50 variant=baseline ok=0/20 no_preamble=8 sync_fail=4 rs_fail=8
+SUMMARY rate=50 variant=p+m+t    ok=15/20 rs_fail=3 sync_fail=2
 ```
+
+Aggregates are keyed by `(symbol rate, variant)`, because a corpus may mix
+symbol rates and averaging across them would mean nothing.
 
 ## What lives where
 
@@ -53,6 +56,7 @@ file = "android-to-mac-007.wav"
 expected = "hello from Android"      # plain UTF-8 payload
 direction = "android-to-mac"          # free-form label, surfaced in output
 profile = "audible"                   # "audible" | "ultrasonic"
+symbol_rate = 50                      # optional; symbols/second, defaults to 50
 
 [[capture]]
 file = "weird-binary.wav"
@@ -60,6 +64,12 @@ expected_hex = "deadbeef00ff"         # use instead of `expected` for arbitrary 
 direction = "mac-to-android"
 profile = "ultrasonic"
 ```
+
+`symbol_rate` is not something the harness can sweep — the sender fixed it when
+it put the signal in the air, exactly like the profile and the `p` flag. Decode
+a 25 sym/s recording at 50 and you get nothing at all, so an omitted field
+silently means "this was recorded at 50". Get it right, or every cell reads as a
+failure of the DSP rather than of the manifest.
 
 Empty manifest (`capture = []`) is valid — `modem rank` will just emit no
 per-cell lines and no summaries.
@@ -78,7 +88,7 @@ Pipe the output through any standard text-processing tool:
 ./target/release/modem rank captures/ | grep '^SUMMARY' | sort -t= -k3 -rn
 
 # Which captures still fail under the best-so-far variant
-./target/release/modem rank captures/ | awk '$3 == "variant=p+m+t" && $4 !~ /=ok$/'
+./target/release/modem rank captures/ | awk '$4 == "variant=p+m+t" && $5 !~ /=ok$/'
 ```
 
 ## Outcome categories
@@ -88,11 +98,19 @@ Each `(capture, variant)` cell produces exactly one outcome:
 | Outcome | Meaning |
 |---------|---------|
 | `ok` | StreamComplete event, SHA-256 matched, decoded bytes equal `expected` |
-| `no_preamble` | No preamble detected — signal too quiet, or chirp not recoverable |
+| `no_preamble` | No frame events at all — the chirp was never found. Signal too quiet, wrong `symbol_rate`, or the wrong file |
 | `sync_fail` | Preamble found but sync word had too many bit errors |
 | `rs_fail` | Sync passed but frame body exceeded Reed–Solomon's correction budget |
+| `crc_fail` | RS reported success but the CRC32 disagreed — RS "corrected" past its budget into a plausible-looking wrong frame |
+| `frame_fail` | A frame event happened, but the stream never completed: some other framing error, or the final frame never arrived |
 | `sha_mismatch` | Frame decoded, but final SHA-256 didn't match the trailer |
 | `wrong_bytes` | Frame decoded, SHA matched, but decoded bytes didn't equal `expected` |
+
+The distinction between `no_preamble` and the rest is load-bearing for
+Android→Mac, where the real symptom is a preamble that locks and a body that
+does not decode. `crc_fail` and `frame_fail` exist because those cells used to
+fall through to `no_preamble`, which made frame-body failures look like signal
+failures — see `docs/android-smoke-test.md`.
 
 ## Variant tags in the output
 
@@ -110,3 +128,9 @@ and `t` actually change RX behaviour for replayed WAVs. To test pulse
 shaping for real you need a fresh capture from a sender that had
 `pulse_shape=true` enabled at transmit time (Android app filter chip, or
 `modem send --pulse-shape` on the Mac).
+
+The same applies, more sharply, to `symbol_rate`: it is baked in at transmit
+time and the harness can only be *told* what it was. `modem tx-wav` and `rx-wav`
+accept `--symbol-rate`; live audio (`send`, `recv`, `chat`) and the Android app
+are still fixed at 50 sym/s, so capturing a 25 sym/s over-the-air transmission
+needs that plumbed through first.

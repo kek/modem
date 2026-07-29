@@ -9,7 +9,7 @@ mod reporter;
 mod tui;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use modem_core::fsk::DspVariants;
+use modem_core::fsk::{DspVariants, DEFAULT_SYMBOL_RATE};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -63,6 +63,11 @@ enum Cmd {
     TxWav {
         #[arg(long, value_enum, default_value_t = Profile::Audible)]
         profile: Profile,
+        /// Symbols per second. Must divide 48000. Halving to 25 buys margin
+        /// against room reverberation at half the bitrate — see
+        /// docs/android-smoke-test.md. The receiver must be told the same rate.
+        #[arg(long, default_value_t = DEFAULT_SYMBOL_RATE)]
+        symbol_rate: u32,
         #[command(flatten)]
         variants: VariantArgs,
         input: PathBuf,
@@ -72,6 +77,10 @@ enum Cmd {
     RxWav {
         #[arg(long, value_enum, default_value_t = Profile::Audible)]
         profile: Profile,
+        /// Symbols per second the sender used. Must match, or the decode is
+        /// garbage.
+        #[arg(long, default_value_t = DEFAULT_SYMBOL_RATE)]
+        symbol_rate: u32,
         #[command(flatten)]
         variants: VariantArgs,
         input: PathBuf,
@@ -148,16 +157,31 @@ fn main() -> anyhow::Result<()> {
                 cmd_recv::run(profile, variants.into(), output, hex, &mut r)
             }
         }
-        Cmd::TxWav { profile, variants, input, output } => cmd_tx_wav::run(profile, variants.into(), input, output),
-        Cmd::RxWav { profile, variants, input, output, hex } => cmd_rx_wav::run(profile, variants.into(), input, output, hex),
+        Cmd::TxWav { profile, symbol_rate, variants, input, output } => {
+            cmd_tx_wav::run(profile, symbol_rate, variants.into(), input, output)
+        }
+        Cmd::RxWav { profile, symbol_rate, variants, input, output, hex } => {
+            cmd_rx_wav::run(profile, symbol_rate, variants.into(), input, output, hex)
+        }
         Cmd::Rank { corpus } => cmd_rank::run(corpus),
         Cmd::Chat { profile, variants } => cmd_chat::run(profile, variants.into()),
     }
 }
 
+/// Build a PHY at the default 50 sym/s. Live audio (`send`, `recv`, `chat`)
+/// and the Android app are still fixed at that rate; only the offline WAV
+/// pair and `rank` can work at another. See docs/android-smoke-test.md.
 pub fn make_phy(profile: Profile, variants: DspVariants) -> modem_core::phy::FskPhy {
+    make_phy_at(profile, DEFAULT_SYMBOL_RATE, variants)
+}
+
+pub fn make_phy_at(
+    profile: Profile,
+    symbol_rate: u32,
+    variants: DspVariants,
+) -> modem_core::phy::FskPhy {
     match profile {
-        Profile::Audible => modem_core::phy::FskPhy::audible_with(variants),
-        Profile::Ultrasonic => modem_core::phy::FskPhy::ultrasonic_with(variants),
+        Profile::Audible => modem_core::phy::FskPhy::audible_at(symbol_rate, variants),
+        Profile::Ultrasonic => modem_core::phy::FskPhy::ultrasonic_at(symbol_rate, variants),
     }
 }
