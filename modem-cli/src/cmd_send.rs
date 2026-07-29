@@ -1,7 +1,6 @@
 use crate::reporter::{Reporter, TxEvent};
-use crate::{make_phy, Profile};
+use crate::PhySpec;
 use modem_codec::tx::Transmitter;
-use modem_core::fsk::DspVariants;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -10,8 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub fn run(
-    profile: Profile,
-    variants: DspVariants,
+    spec: PhySpec,
     input: Option<PathBuf>,
     reporter: &mut dyn Reporter,
 ) -> anyhow::Result<()> {
@@ -23,9 +21,7 @@ pub fn run(
             buf
         }
     };
-    let phy = make_phy(profile, variants);
-    let ultrasonic = matches!(profile, Profile::Ultrasonic);
-    let tx = Transmitter::new(phy, ultrasonic);
+    let tx = Transmitter::new(spec.phy(), spec.ultrasonic());
     let samples = tx.encode(&bytes);
     let total_sec = samples.len() as f32 / 48_000.0;
     reporter.on_tx(TxEvent::Starting {

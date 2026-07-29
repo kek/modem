@@ -38,6 +38,11 @@ impl<P: Phy> Receiver<P> {
         }
     }
 
+    /// The PHY this receiver demodulates with. See `Transmitter::phy`.
+    pub fn phy(&self) -> &P {
+        &self.phy
+    }
+
     pub fn push_samples(&mut self, samples: &[f32]) -> Vec<FrameEvent> {
         self.buffer.extend_from_slice(samples);
         let mut events = Vec::new();

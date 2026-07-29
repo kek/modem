@@ -200,10 +200,12 @@ Use `--release`. The `stream_roundtrip` proptest takes tens of minutes in debug.
 
 > **Every number in this section is simulated.** No Android→Mac transmission at
 > 25 sym/s has been recorded or decoded over the air, on this machine or any
-> other — the CLI and the Android app still transmit at 50. What follows is
-> evidence from a channel model, and that model is known not to match the real
-> captures on the preamble. Read it as "the strongest candidate found so far",
-> never as "Android→Mac works now".
+> other. The rate is now expressible everywhere on the Rust side — live CLI
+> audio and the UniFFI surface included — but expressible is not recorded, and
+> the Android app still asks for the default. What follows is evidence from a
+> channel model, and that model is known not to match the real captures on the
+> preamble. Read it as "the strongest candidate found so far", never as
+> "Android→Mac works now".
 
 The section above named exactly one cheap knob still unmeasured: drop the
 symbol rate. It has now been measured. **In simulation it is the first remedy
@@ -336,11 +338,22 @@ exactly like the profile does. So:
   (defaults to 50), because the rate is baked into a recording the same way the
   `p` flag is. Replaying a 25 sym/s capture at 50 decodes nothing, pinned by
   `rank_at_the_wrong_symbol_rate_decodes_nothing`.
-- `modem tx-wav` / `rx-wav` take `--symbol-rate`.
-- **Still fixed at 50:** live audio (`modem send`, `recv`, `chat`) and the
-  Android app via `modem-ffi`. A real over-the-air Android→Mac capture at
-  25 sym/s needs the rate plumbed through the UniFFI surface first. That is the
-  next piece of work if this result is to be confirmed.
+- Every `modem` subcommand that drives the modem takes `--symbol-rate`: the
+  offline pair `tx-wav` / `rx-wav` and the live paths `send`, `recv`, `chat`.
+  They share one `PhyArgs` block, so there is no rate-less way to build a PHY
+  left in the CLI.
+- `modem-ffi` exposes it as `FfiTransmitter.newAt` / `FfiReceiver.newAt`
+  (symbols/second; `defaultSymbolRate()` returns 50, so a caller need not
+  hard-code it), and both objects report the rate their PHY *actually* runs at
+  through `symbolRate`, read off the PHY rather than the argument. Pinned by
+  `modem-ffi/tests/symbol_rate.rs`, which decodes a 25 sym/s transmission
+  through the surface and shows a default-rate receiver failing on the same
+  buffer.
+- **Still 50 in practice: the Android app.** `ModemViewModel` calls the
+  rate-less `FfiTransmitter(profile, variants)` / `FfiReceiver(profile,
+  variants)` constructors, so the phone transmits at 50 until the app offers the
+  rate. That — plus a Pixel and a quiet room — is what a real Android→Mac
+  capture at 25 sym/s now needs; the Rust side is no longer the blocker.
 
 ### So is Android→Mac fixed?
 

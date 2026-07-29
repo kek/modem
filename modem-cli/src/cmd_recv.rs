@@ -1,23 +1,20 @@
 use crate::output_format::{is_printable, print_hex};
 use crate::reporter::{Reporter, RxEvent};
-use crate::{make_phy, Profile};
+use crate::PhySpec;
 use modem_audio::input::open_mic;
 use modem_codec::rx::{FrameEvent, Receiver};
-use modem_core::fsk::DspVariants;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub fn run(
-    profile: Profile,
-    variants: DspVariants,
+    spec: PhySpec,
     output: Option<PathBuf>,
     hex: bool,
     reporter: &mut dyn Reporter,
 ) -> anyhow::Result<()> {
-    let phy = make_phy(profile, variants);
-    let mut rx = Receiver::new(phy);
+    let mut rx = Receiver::new(spec.phy());
     let mic = open_mic()?;
 
     reporter.on_rx(RxEvent::Listening);

@@ -39,11 +39,10 @@
 //! SUMMARY rate=50 variant=baseline ok=0/20 no_preamble=8 sync_fail=4 rs_fail=8
 //! ```
 
-use crate::Profile;
+use crate::{PhySpec, Profile};
 use hound::WavReader;
 use modem_codec::rx::{FrameEvent, Receiver};
 use modem_core::fsk::{DspVariants, DEFAULT_SYMBOL_RATE};
-use modem_core::phy::FskPhy;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -187,13 +186,6 @@ fn classify(events: &[FrameEvent], expected: &[u8]) -> Outcome {
     }
 }
 
-fn make_phy(profile: Profile, symbol_rate: u32, variants: DspVariants) -> FskPhy {
-    match profile {
-        Profile::Audible => FskPhy::audible_at(symbol_rate, variants),
-        Profile::Ultrasonic => FskPhy::ultrasonic_at(symbol_rate, variants),
-    }
-}
-
 fn all_variants() -> Vec<DspVariants> {
     let mut out = Vec::with_capacity(8);
     for ps in [false, true] {
@@ -223,8 +215,8 @@ pub fn run(corpus: PathBuf) -> anyhow::Result<()> {
         let profile = entry.profile()?;
         let symbol_rate = entry.symbol_rate.unwrap_or(DEFAULT_SYMBOL_RATE);
         for variants in all_variants() {
-            let phy = make_phy(profile, symbol_rate, variants);
-            let mut rx = Receiver::new(phy);
+            let spec = PhySpec { profile, symbol_rate, variants };
+            let mut rx = Receiver::new(spec.phy());
             let events = rx.push_samples(&samples);
             let outcome = classify(&events, &expected);
             println!(
