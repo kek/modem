@@ -3,6 +3,9 @@
 //! ```bash
 //! cargo run --release -p modem-codec --example gen_sim_corpus -- captures/simulated
 //! ./target/release/modem rank captures/simulated
+//!
+//! # …or at a different symbol rate (second argument, default 50):
+//! cargo run --release -p modem-codec --example gen_sim_corpus -- captures/sim-25 25
 //! ```
 //!
 //! These WAVs are synthesised by pushing a generated transmission through
@@ -25,7 +28,7 @@
 use hound::{SampleFormat, WavSpec, WavWriter};
 use modem_codec::tx::Transmitter;
 use modem_core::channel::{android_to_mac, AndroidToMac};
-use modem_core::fsk::{DspVariants, SAMPLE_RATE};
+use modem_core::fsk::{DspVariants, DEFAULT_SYMBOL_RATE, SAMPLE_RATE};
 use modem_core::phy::FskPhy;
 use std::fs;
 use std::path::PathBuf;
@@ -54,6 +57,10 @@ fn main() -> anyhow::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "captures/simulated".into())
         .into();
+    let symbol_rate: u32 = match std::env::args().nth(2) {
+        Some(s) => s.parse().map_err(|_| anyhow::anyhow!("bad symbol rate {s:?}"))?,
+        None => DEFAULT_SYMBOL_RATE,
+    };
     fs::create_dir_all(&out_dir)?;
 
     let spec = WavSpec {
@@ -75,7 +82,7 @@ fn main() -> anyhow::Result<()> {
     ] {
         for (room_name, reverb_wet) in rooms() {
             for (pl_name, payload) in payloads() {
-                let tx = Transmitter::new(FskPhy::audible_with(tx_variants), false);
+                let tx = Transmitter::new(FskPhy::audible_at(symbol_rate, tx_variants), false);
                 let mut air = vec![0f32; 4800];
                 air.extend_from_slice(&tx.encode(&payload));
                 let heard = android_to_mac(
@@ -84,7 +91,7 @@ fn main() -> anyhow::Result<()> {
                     SAMPLE_RATE,
                 );
 
-                let file = format!("sim-{tx_name}-{room_name}-{pl_name}.wav");
+                let file = format!("sim-{symbol_rate}sps-{tx_name}-{room_name}-{pl_name}.wav");
                 let mut w = WavWriter::create(out_dir.join(&file), spec)?;
                 for s in &heard {
                     w.write_sample(*s)?;
@@ -93,7 +100,8 @@ fn main() -> anyhow::Result<()> {
 
                 manifest.push_str(&format!(
                     "[[capture]]\nfile = \"{file}\"\nexpected_hex = \"{}\"\n\
-                     direction = \"sim-android-to-mac/{tx_name}/{room_name}\"\nprofile = \"audible\"\n\n",
+                     direction = \"sim-android-to-mac/{tx_name}/{room_name}\"\nprofile = \"audible\"\n\
+                     symbol_rate = {symbol_rate}\n\n",
                     hex(&payload)
                 ));
                 count += 1;
@@ -102,6 +110,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     fs::write(out_dir.join("manifest.toml"), manifest)?;
-    println!("wrote {count} simulated captures + manifest.toml to {}", out_dir.display());
+    println!(
+        "wrote {count} simulated captures at {symbol_rate} sym/s + manifest.toml to {}",
+        out_dir.display()
+    );
     Ok(())
 }

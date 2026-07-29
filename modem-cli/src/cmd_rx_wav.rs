@@ -1,5 +1,5 @@
 use crate::output_format::{is_printable, print_hex};
-use crate::{make_phy, Profile};
+use crate::{make_phy_at, Profile};
 use hound::WavReader;
 use modem_codec::rx::{FrameEvent, Receiver};
 use modem_core::fsk::DspVariants;
@@ -7,7 +7,14 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-pub fn run(profile: Profile, variants: DspVariants, input: PathBuf, output: Option<PathBuf>, hex: bool) -> anyhow::Result<()> {
+pub fn run(
+    profile: Profile,
+    symbol_rate: u32,
+    variants: DspVariants,
+    input: PathBuf,
+    output: Option<PathBuf>,
+    hex: bool,
+) -> anyhow::Result<()> {
     let mut reader = WavReader::open(&input)?;
     let samples: Vec<f32> = match reader.spec().sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().filter_map(|s| s.ok()).collect(),
@@ -17,7 +24,7 @@ pub fn run(profile: Profile, variants: DspVariants, input: PathBuf, output: Opti
             .collect(),
     };
 
-    let phy = make_phy(profile, variants);
+    let phy = make_phy_at(profile, symbol_rate, variants);
     let mut rx = Receiver::new(phy);
     let events = rx.push_samples(&samples);
 

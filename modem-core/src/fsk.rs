@@ -7,6 +7,15 @@ pub const BITS_PER_SYMBOL: usize = 3;
 /// Fixed sample rate everywhere.
 pub const SAMPLE_RATE: u32 = 48_000;
 
+/// Symbol rate both profiles use unless asked for another, in symbols/second.
+/// 50 sym/s = 20 ms symbols; see `FskConfig::audible` for why.
+///
+/// The rate is not part of the frame format — the preamble chirp, the sync
+/// word and the frame layout are all identical at any rate — but it *is* a
+/// property of a recording, and both ends have to agree on it out of band,
+/// exactly like the profile does.
+pub const DEFAULT_SYMBOL_RATE: u32 = 50;
+
 /// Runtime-selectable DSP variants. All default to OFF, preserving legacy
 /// trunk behaviour. Each flag is documented in `docs/android-smoke-test.md`
 /// under "Suggested follow-up DSP work".
@@ -72,13 +81,22 @@ impl FskConfig {
     }
 
     pub fn audible_with(variants: DspVariants) -> Self {
+        Self::audible_at(DEFAULT_SYMBOL_RATE, variants)
+    }
+
+    /// Audible profile at an explicit symbol rate.
+    ///
+    /// Halving the rate is the one cheap knob that attacks inter-symbol
+    /// interference — see `docs/android-smoke-test.md`. It also halves
+    /// throughput, so it is a trade, not a free win.
+    pub fn audible_at(symbol_rate: u32, variants: DspVariants) -> Self {
         let mut tones = [0f32; N_TONES];
         for i in 0..N_TONES {
             tones[i] = 2000.0 + (i as f32) * 200.0; // 2000..3400
         }
         Self {
             sample_rate: SAMPLE_RATE,
-            symbol_samples: SAMPLE_RATE as usize / 50, // 20 ms
+            symbol_samples: symbol_samples_for(symbol_rate),
             tone_freqs: tones,
             variants,
         }
@@ -90,17 +108,44 @@ impl FskConfig {
     }
 
     pub fn ultrasonic_with(variants: DspVariants) -> Self {
+        Self::ultrasonic_at(DEFAULT_SYMBOL_RATE, variants)
+    }
+
+    /// Ultrasonic profile at an explicit symbol rate.
+    pub fn ultrasonic_at(symbol_rate: u32, variants: DspVariants) -> Self {
         let mut tones = [0f32; N_TONES];
         for i in 0..N_TONES {
             tones[i] = 17_500.0 + (i as f32) * 250.0;
         }
         Self {
             sample_rate: SAMPLE_RATE,
-            symbol_samples: SAMPLE_RATE as usize / 50, // 20 ms
+            symbol_samples: symbol_samples_for(symbol_rate),
             tone_freqs: tones,
             variants,
         }
     }
+
+    /// Symbols per second this config actually runs at.
+    pub fn symbol_rate(&self) -> u32 {
+        self.sample_rate / self.symbol_samples as u32
+    }
+}
+
+/// Samples per symbol at `symbol_rate`.
+///
+/// The rate must divide `SAMPLE_RATE` exactly. A non-dividing rate would
+/// silently run at `SAMPLE_RATE / symbol_samples` instead, and since the
+/// receiver derives its window length the same way, a transmitter and a
+/// receiver asking for the same nominal rate would still agree — but every
+/// report of "N sym/s" would be a lie. Refuse instead.
+fn symbol_samples_for(symbol_rate: u32) -> usize {
+    assert!(symbol_rate > 0, "symbol rate must be positive");
+    assert_eq!(
+        SAMPLE_RATE % symbol_rate,
+        0,
+        "symbol rate {symbol_rate} does not divide the {SAMPLE_RATE} Hz sample rate exactly"
+    );
+    (SAMPLE_RATE / symbol_rate) as usize
 }
 
 /// Convert bytes to a sequence of 3-bit symbols (MSB first within each byte).
@@ -211,6 +256,27 @@ mod tests {
         assert_eq!(c.symbol_samples, 960);
         assert_eq!(c.tone_freqs[0], 17_500.0);
         assert_eq!(c.tone_freqs[7], 19_250.0);
+    }
+
+    #[test]
+    fn halving_the_symbol_rate_doubles_the_symbol() {
+        let fast = FskConfig::audible_at(50, DspVariants::BASELINE);
+        let slow = FskConfig::audible_at(25, DspVariants::BASELINE);
+        assert_eq!(fast.symbol_samples, 960);
+        assert_eq!(slow.symbol_samples, 1920);
+        assert_eq!(fast.symbol_rate(), 50);
+        assert_eq!(slow.symbol_rate(), 25);
+        // The rate must not disturb the tones — it is a timing change only.
+        assert_eq!(fast.tone_freqs, slow.tone_freqs);
+        assert_eq!(FskConfig::audible_with(DspVariants::BASELINE).symbol_rate(), DEFAULT_SYMBOL_RATE);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not divide")]
+    fn a_symbol_rate_that_does_not_divide_the_sample_rate_is_refused() {
+        // 48000 / 7 = 6857.14…, so this would silently run at 48000/6857 = 7.0…
+        // sym/s while every report claimed 7. Refuse rather than mislead.
+        FskConfig::audible_at(7, DspVariants::BASELINE);
     }
 
     #[test]
@@ -487,6 +553,24 @@ mod demod_tests {
                     assert_eq!(back_syms, syms, "roundtrip failed for {}", variants.tag());
                 }
             }
+        }
+    }
+
+    /// The clean-channel net again, at half the symbol rate. Nothing about
+    /// modulate/demodulate should care what `symbol_samples` is.
+    #[test]
+    fn roundtrip_clean_at_half_the_symbol_rate() {
+        let bytes = b"twenty five symbols per second".to_vec();
+        for cfg in [
+            FskConfig::audible_at(25, DspVariants::BASELINE),
+            FskConfig::audible_at(25, DspVariants::ALL),
+            FskConfig::ultrasonic_at(25, DspVariants::BASELINE),
+            FskConfig::ultrasonic_at(25, DspVariants::ALL),
+        ] {
+            let syms = bytes_to_symbols(&bytes);
+            let samples = modulate(&cfg, &syms);
+            assert_eq!(samples.len(), syms.len() * 1920);
+            assert_eq!(demodulate(&cfg, &samples), syms);
         }
     }
 }

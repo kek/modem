@@ -30,6 +30,17 @@ impl FskPhy {
     pub fn ultrasonic_with(variants: DspVariants) -> Self {
         Self { cfg: FskConfig::ultrasonic_with(variants), preamble: preamble_samples() }
     }
+
+    /// Audible profile at an explicit symbol rate. The preamble is unchanged —
+    /// the chirp is a fixed 80 ms waveform and knows nothing about symbols.
+    pub fn audible_at(symbol_rate: u32, variants: DspVariants) -> Self {
+        Self { cfg: FskConfig::audible_at(symbol_rate, variants), preamble: preamble_samples() }
+    }
+    /// Ultrasonic profile at an explicit symbol rate.
+    pub fn ultrasonic_at(symbol_rate: u32, variants: DspVariants) -> Self {
+        Self { cfg: FskConfig::ultrasonic_at(symbol_rate, variants), preamble: preamble_samples() }
+    }
+
     pub fn config(&self) -> &FskConfig { &self.cfg }
 }
 

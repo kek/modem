@@ -19,14 +19,22 @@
 //!      recover it.
 //!   3. `no_variant_survives_a_more_reverberant_room` — move the room only
 //!      slightly past that threshold and all eight combinations fail together.
+//!
+//! The `halving_*` tests at the end answer the follow-up question that finding
+//! left open: does dropping to 25 sym/s, the one cheap knob that attacks ISI
+//! directly, buy back the direction? **In simulation, yes** — and at exactly
+//! half the bitrate, which those tests pin too.
 
 use modem_codec::rx::{FrameEvent, Receiver};
 use modem_codec::tx::Transmitter;
 use modem_core::channel::{
     android_to_mac, speaker_distortion, total_harmonic_distortion, AndroidToMac, SpeakerDistortion,
 };
-use modem_core::fsk::{DspVariants, SAMPLE_RATE};
-use modem_core::phy::FskPhy;
+use modem_core::fsk::{DspVariants, FskConfig, DEFAULT_SYMBOL_RATE, SAMPLE_RATE};
+use modem_core::phy::{FskPhy, Phy};
+
+/// The candidate rate this file's `halving_*` tests measure: half of today's.
+const HALVED_SYMBOL_RATE: u32 = 25;
 
 /// The payload that sits closest to the failure threshold, and so is the one
 /// the pinned single-case tests use.
@@ -65,27 +73,42 @@ fn all_variants() -> Vec<DspVariants> {
     out
 }
 
-/// Transmit `payload` with `variants` enabled, push it through `channel`, and
-/// receive it with the same variants. True iff the stream came back intact.
-fn survives(variants: DspVariants, payload: &[u8], channel: AndroidToMac) -> bool {
-    let tx = Transmitter::new(FskPhy::audible_with(variants), false);
+/// Transmit `payload` at `symbol_rate` with `variants` enabled, push it through
+/// `channel`, and receive it at the same rate with the same variants. True iff
+/// the stream came back intact.
+fn survives_at(
+    symbol_rate: u32,
+    variants: DspVariants,
+    payload: &[u8],
+    channel: AndroidToMac,
+) -> bool {
+    let tx = Transmitter::new(FskPhy::audible_at(symbol_rate, variants), false);
     // Lead-in silence, as any real capture has.
     let mut air = vec![0f32; 4800];
     air.extend_from_slice(&tx.encode(payload));
     let heard = android_to_mac(&air, channel, SAMPLE_RATE);
 
-    let mut rx = Receiver::new(FskPhy::audible_with(variants));
+    let mut rx = Receiver::new(FskPhy::audible_at(symbol_rate, variants));
     rx.push_samples(&heard).iter().any(|e| {
         matches!(e, FrameEvent::StreamComplete { bytes, sha256_ok: true } if bytes == payload)
     })
+}
+
+/// `survives_at` at today's shipping rate.
+fn survives(variants: DspVariants, payload: &[u8], channel: AndroidToMac) -> bool {
+    survives_at(DEFAULT_SYMBOL_RATE, variants, payload, channel)
 }
 
 fn survivors(variants: DspVariants, channel: AndroidToMac) -> usize {
     corpus().iter().filter(|(_, p)| survives(variants, p, channel)).count()
 }
 
+fn hard_survivors_at(symbol_rate: u32, variants: DspVariants, channel: AndroidToMac) -> usize {
+    hard_corpus().iter().filter(|(_, p)| survives_at(symbol_rate, variants, p, channel)).count()
+}
+
 fn hard_survivors(variants: DspVariants, channel: AndroidToMac) -> usize {
-    hard_corpus().iter().filter(|(_, p)| survives(variants, p, channel)).count()
+    hard_survivors_at(DEFAULT_SYMBOL_RATE, variants, channel)
 }
 
 /// The `PIXEL_AT_FULL_VOLUME` preset must stay in the range real micro-speakers
@@ -214,5 +237,131 @@ fn a_transition_free_payload_survives_the_room_that_kills_the_others() {
     assert!(
         survives(DspVariants::BASELINE, &[0xFF; 150], livelier),
         "a constant-tone payload has no ISI to suffer from and should survive"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 25 sym/s — the one cheap remedy that attacks ISI rather than symbol shape.
+// ---------------------------------------------------------------------------
+
+/// The headline: at the documented 30 cm geometry, halving the symbol rate
+/// recovers the transmission that plain trunk loses — with *no* DSP remedies
+/// enabled at all.
+///
+/// `android_to_mac_defeats_baseline` above pins that `MARGINAL` at 50 sym/s
+/// under `BASELINE` fails. The only thing changed here is the symbol rate.
+#[test]
+fn halving_the_symbol_rate_recovers_what_baseline_loses() {
+    assert!(
+        survives_at(
+            HALVED_SYMBOL_RATE,
+            DspVariants::BASELINE,
+            MARGINAL,
+            AndroidToMac::PIXEL_8_PRO_AT_30CM
+        ),
+        "25 sym/s was expected to recover, with no remedies, the transmission \
+         that 50 sym/s BASELINE loses over the same channel"
+    );
+}
+
+/// And it does what none of the three remedies could: it moves the cliff.
+///
+/// `no_variant_survives_a_more_reverberant_room` pins that at `reverb_wet =
+/// 0.25` all eight combinations go to zero together at 50 sym/s, because none
+/// of them is an equalizer. Halving the symbol rate is not an equalizer
+/// either, but it does not need to be — it halves how many symbols the
+/// reverberant tail can reach into, and that is enough to put survivors back
+/// on the board in the room that was previously a wipeout.
+#[test]
+fn halving_the_symbol_rate_moves_the_cliff() {
+    let livelier = AndroidToMac { reverb_wet: 0.25, ..AndroidToMac::PIXEL_8_PRO_AT_30CM };
+    let at_50 = hard_survivors(DspVariants::ALL, livelier);
+    let at_25 = hard_survivors_at(HALVED_SYMBOL_RATE, DspVariants::ALL, livelier);
+    assert_eq!(at_50, 0, "the 50 sym/s wipeout is the premise of this test");
+    assert!(
+        at_25 > at_50,
+        "expected 25 sym/s to recover something at reverb_wet=0.25 where every \
+         50 sym/s variant scores zero; got {at_25}/{} vs {at_50}/{}",
+        hard_corpus().len(),
+        hard_corpus().len()
+    );
+}
+
+/// The bill. Halving the symbol rate halves the bitrate — 150 bps raw becomes
+/// 75 bps — and doubles the time a transmission occupies the air. This is not
+/// a free win, and any decision to ship it is a throughput trade.
+#[test]
+fn halving_the_symbol_rate_halves_the_bitrate() {
+    let fast = FskConfig::audible_at(DEFAULT_SYMBOL_RATE, DspVariants::BASELINE);
+    let slow = FskConfig::audible_at(HALVED_SYMBOL_RATE, DspVariants::BASELINE);
+    assert_eq!(fast.symbol_rate(), 50);
+    assert_eq!(slow.symbol_rate(), 25);
+    assert_eq!(slow.symbol_samples, 2 * fast.symbol_samples);
+
+    // …and that shows up as air time on a real transmission, not just in the
+    // config. The preamble is a fixed 80 ms and does not scale, so the ratio
+    // lands just under 2×.
+    let air = |rate: u32| {
+        Transmitter::new(FskPhy::audible_at(rate, DspVariants::BASELINE), false)
+            .encode(MARGINAL)
+            .len() as f32
+            / SAMPLE_RATE as f32
+    };
+    let (fast_s, slow_s) = (air(DEFAULT_SYMBOL_RATE), air(HALVED_SYMBOL_RATE));
+    let ratio = slow_s / fast_s;
+    assert!(
+        (1.98..=2.0).contains(&ratio),
+        "expected ~2x air time for half the symbol rate, got {fast_s:.2}s -> {slow_s:.2}s ({ratio:.3}x)"
+    );
+}
+
+/// The limit of the cheap fix, pinned so nobody reads the tests above as
+/// "Android→Mac is solved". Push the room well past the documented geometry
+/// and 25 sym/s dies just as thoroughly as 50 did. Slower symbols buy margin
+/// against ISI; they do not equalize it away. OFDM with a cyclic prefix
+/// remains the remedy that actually addresses the mechanism.
+#[test]
+fn halving_the_symbol_rate_is_not_a_cure_for_a_wet_room() {
+    let wet = AndroidToMac { reverb_wet: 0.35, ..AndroidToMac::PIXEL_8_PRO_AT_30CM };
+    for v in all_variants() {
+        assert_eq!(
+            hard_survivors_at(HALVED_SYMBOL_RATE, v, wet),
+            0,
+            "variant {} at 25 sym/s unexpectedly recovered something at reverb_wet=0.35",
+            v.tag()
+        );
+    }
+}
+
+/// Symbol rate cannot touch the preamble, and that matters for how far these
+/// results can be trusted.
+///
+/// The chirp is a fixed 80 ms waveform that knows nothing about symbols, so it
+/// correlates identically at either rate — verified here on the actual
+/// channel, not argued from the source. The real Android→Mac captures scored
+/// 0.28-0.35 on the preamble where this model scores ~0.86, and whatever
+/// attacks the real chirp that hard is therefore *untouched* by this change.
+/// A simulated pass at 25 sym/s is a reason to go and capture, not a fix.
+#[test]
+fn symbol_rate_does_not_change_the_preamble() {
+    let tx = Transmitter::new(FskPhy::audible_with(DspVariants::BASELINE), false);
+    let mut air = vec![0f32; 4800];
+    air.extend_from_slice(&tx.encode(MARGINAL));
+    let heard = android_to_mac(&air, AndroidToMac::PIXEL_8_PRO_AT_30CM, SAMPLE_RATE);
+    let window = &heard[..24_000];
+
+    let fast = FskPhy::audible_at(DEFAULT_SYMBOL_RATE, DspVariants::BASELINE)
+        .detect_preamble(window)
+        .expect("preamble detectable");
+    let slow = FskPhy::audible_at(HALVED_SYMBOL_RATE, DspVariants::BASELINE)
+        .detect_preamble(window)
+        .expect("preamble detectable");
+    assert_eq!(fast, slow, "symbol rate must not affect preamble detection");
+    assert!(
+        fast.1 > 0.8,
+        "the model's chirp survives this room easily (score {:.3}) — far better \
+         than the 0.28-0.35 the real captures showed. That gap is unexplained \
+         and no symbol-rate change can close it.",
+        fast.1
     );
 }
