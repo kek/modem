@@ -980,6 +980,8 @@ dependencies = [
 name = "modem-codec"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "hound",
  "modem-core",
  "proptest",
  "sha2",
