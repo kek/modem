@@ -130,7 +130,10 @@ shaping for real you need a fresh capture from a sender that had
 `modem send --pulse-shape` on the Mac).
 
 The same applies, more sharply, to `symbol_rate`: it is baked in at transmit
-time and the harness can only be *told* what it was. `modem tx-wav` and `rx-wav`
-accept `--symbol-rate`; live audio (`send`, `recv`, `chat`) and the Android app
-are still fixed at 50 sym/s, so capturing a 25 sym/s over-the-air transmission
-needs that plumbed through first.
+time and the harness can only be *told* what it was. Every `modem` subcommand
+now accepts `--symbol-rate`, live audio (`send`, `recv`, `chat`) included, and
+`modem-ffi` exposes it as `FfiTransmitter.newAt` / `FfiReceiver.newAt`. So a
+Mac-side 25 sym/s capture needs nothing more than the flag on both ends. The
+Android app is the one sender still pinned to 50: it calls the rate-less
+constructors, so a 25 sym/s capture *from the phone* waits on the app offering
+the rate.

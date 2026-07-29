@@ -2,12 +2,12 @@
 //! decoded concurrently so received messages appear in the log. Shares the
 //! tone-bar + frame-timeline visualization with `recv`/`send`.
 
-use crate::{make_phy, Profile};
+use crate::PhySpec;
 use modem_audio::input::open_mic;
 use modem_codec::rx::{FrameEvent, Receiver};
 use modem_codec::tx::Transmitter;
 use modem_core::frame::{FRAME_LEN, HEADER_LEN, MAX_PAYLOAD};
-use modem_core::fsk::{goertzel_bank, DspVariants, FskConfig};
+use modem_core::fsk::goertzel_bank;
 use modem_core::phy::{FskPhy, Phy};
 use modem_core::preamble::SYNC_WORD;
 use std::io::stdout;
@@ -98,35 +98,25 @@ impl SegKind {
     }
 }
 
-pub fn run(profile: Profile, variants: DspVariants) -> anyhow::Result<()> {
-    let cfg = match profile {
-        Profile::Audible => FskConfig::audible(),
-        Profile::Ultrasonic => FskConfig::ultrasonic(),
-    };
+pub fn run(spec: PhySpec) -> anyhow::Result<()> {
+    let cfg = spec.config();
     let freqs: Vec<f32> = cfg.tone_freqs.to_vec();
     let sample_rate = cfg.sample_rate;
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
-    let result = run_loop(profile, variants, freqs, sample_rate);
+    let result = run_loop(spec, freqs, sample_rate);
     let _ = disable_raw_mode();
     let _ = execute!(stdout(), LeaveAlternateScreen);
     result
 }
 
-fn run_loop(
-    profile: Profile,
-    variants: DspVariants,
-    freqs: Vec<f32>,
-    sample_rate: u32,
-) -> anyhow::Result<()> {
+fn run_loop(spec: PhySpec, freqs: Vec<f32>, sample_rate: u32) -> anyhow::Result<()> {
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mic = open_mic()?;
-    let phy_rx = make_phy(profile, variants);
-    let mut rx = Receiver::new(phy_rx);
-    let phy_tx = make_phy(profile, variants);
-    let ultrasonic = matches!(profile, Profile::Ultrasonic);
-    let tx = Transmitter::new(phy_tx, ultrasonic);
+    let mut rx = Receiver::new(spec.phy());
+    let ultrasonic = spec.ultrasonic();
+    let tx = Transmitter::new(spec.phy(), ultrasonic);
 
     let mut tones_db: Vec<f32> = vec![DB_FLOOR; freqs.len()];
     let mut rms = 0.0f32;
@@ -135,8 +125,9 @@ fn run_loop(
     let mut total_dropped = 0usize;
     let mut log: Vec<LogEntry> = Vec::new();
     log.push(LogEntry::Info(format!(
-        "interactive chat on {} · Enter to send · Esc/Ctrl-D to quit",
-        if ultrasonic { "ultrasonic" } else { "audible" }
+        "interactive chat on {} at {} sym/s · Enter to send · Esc/Ctrl-D to quit",
+        if ultrasonic { "ultrasonic" } else { "audible" },
+        spec.config().symbol_rate(),
     )));
 
     let mut input = String::new();
@@ -194,7 +185,7 @@ fn run_loop(
                     // outgoing) doesn't get misinterpreted as a fresh frame.
                     t.cursor = t.samples.len();
                     t.done = true;
-                    rx = Receiver::new(make_phy(profile, variants));
+                    rx = Receiver::new(spec.phy());
                 }
             }
         }
@@ -213,7 +204,7 @@ fn run_loop(
                                 let bytes = input.as_bytes().to_vec();
                                 let samples = tx.encode(&bytes);
                                 let total_sec = samples.len() as f32 / sample_rate as f32;
-                                let (segments, user_range) = compute_segments(&bytes, profile, variants);
+                                let (segments, user_range) = compute_segments(&bytes, spec);
                                 push_log(&mut log, LogEntry::Sent(input.clone()));
                                 let log_pos = log.len() - 1;
                                 let samples_for_play = samples.clone();
@@ -468,11 +459,7 @@ fn update_tones(
 /// user bytes — excluding the appended SHA-256 hash, padding, parity and
 /// CRC — so the chat-log character highlighter advances at the same pace
 /// as the green segments in the panel.
-fn compute_segments(
-    payload: &[u8],
-    profile: Profile,
-    variants: DspVariants,
-) -> (Vec<Segment>, (usize, usize)) {
+fn compute_segments(payload: &[u8], spec: PhySpec) -> (Vec<Segment>, (usize, usize)) {
     // The transmitter appends a SHA-256 to the user payload then chunks the
     // result into MAX_PAYLOAD-sized frame payloads. Walk that layout so we
     // can colour user bytes (green) separately from the SHA tail (light
@@ -483,7 +470,7 @@ fn compute_segments(
     let sha_len = 32usize;
     let full_len = user_len + sha_len;
 
-    let phy = make_phy(profile, variants);
+    let phy = spec.phy();
     let preamble_len = <FskPhy as Phy>::preamble(&phy).len();
     let frame_data_samples = phy.frame_data_samples(SYNC_WORD.len() + FRAME_LEN);
     let total_bytes_in_frame = SYNC_WORD.len() + FRAME_LEN;

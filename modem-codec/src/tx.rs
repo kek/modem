@@ -13,6 +13,13 @@ impl<P: Phy> Transmitter<P> {
         Self { phy, ultrasonic }
     }
 
+    /// The PHY this transmitter modulates with. A caller that wants to report
+    /// what is actually going on the wire — symbol rate, tone frequencies —
+    /// should ask the PHY rather than repeat what it passed in.
+    pub fn phy(&self) -> &P {
+        &self.phy
+    }
+
     /// Encode `payload` into a complete audio sample buffer (preamble + sync + frame, repeated).
     pub fn encode(&self, payload: &[u8]) -> Vec<f32> {
         // Append SHA-256 to last frame's data.

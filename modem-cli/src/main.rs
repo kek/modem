@@ -27,10 +27,8 @@ struct Cli {
 enum Cmd {
     /// Transmit live over speaker.
     Send {
-        #[arg(long, value_enum, default_value_t = Profile::Audible)]
-        profile: Profile,
         #[command(flatten)]
-        variants: VariantArgs,
+        phy: PhyArgs,
         /// Force the ratatui dashboard even when stdout isn't a TTY.
         #[arg(long, conflicts_with = "plain")]
         tui: bool,
@@ -42,10 +40,8 @@ enum Cmd {
     },
     /// Receive live from microphone.
     Recv {
-        #[arg(long, value_enum, default_value_t = Profile::Audible)]
-        profile: Profile,
         #[command(flatten)]
-        variants: VariantArgs,
+        phy: PhyArgs,
         /// Output file; if omitted, writes to stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -61,28 +57,15 @@ enum Cmd {
     },
     /// Offline: encode bytes to a WAV file.
     TxWav {
-        #[arg(long, value_enum, default_value_t = Profile::Audible)]
-        profile: Profile,
-        /// Symbols per second. Must divide 48000. Halving to 25 buys margin
-        /// against room reverberation at half the bitrate — see
-        /// docs/android-smoke-test.md. The receiver must be told the same rate.
-        #[arg(long, default_value_t = DEFAULT_SYMBOL_RATE)]
-        symbol_rate: u32,
         #[command(flatten)]
-        variants: VariantArgs,
+        phy: PhyArgs,
         input: PathBuf,
         output: PathBuf,
     },
     /// Offline: decode a WAV file back to bytes.
     RxWav {
-        #[arg(long, value_enum, default_value_t = Profile::Audible)]
-        profile: Profile,
-        /// Symbols per second the sender used. Must match, or the decode is
-        /// garbage.
-        #[arg(long, default_value_t = DEFAULT_SYMBOL_RATE)]
-        symbol_rate: u32,
         #[command(flatten)]
-        variants: VariantArgs,
+        phy: PhyArgs,
         input: PathBuf,
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -99,11 +82,27 @@ enum Cmd {
     },
     /// Interactive: type a line, press Enter, transmit it; repeat.
     Chat {
-        #[arg(long, value_enum, default_value_t = Profile::Audible)]
-        profile: Profile,
         #[command(flatten)]
-        variants: VariantArgs,
+        phy: PhyArgs,
     },
+}
+
+/// Which PHY a command should build. Every subcommand that touches the modem
+/// takes this same block, so `--symbol-rate` means the same thing to live audio
+/// as it does to the offline WAV pair.
+#[derive(Args, Clone, Copy)]
+pub struct PhyArgs {
+    #[arg(long, value_enum, default_value_t = Profile::Audible)]
+    pub profile: Profile,
+    /// Symbols per second. Must divide 48000. Halving to 25 buys margin
+    /// against room reverberation at half the bitrate — see
+    /// docs/android-smoke-test.md. The rate is not part of the frame format,
+    /// so both ends must be told the same one; a receiver at the wrong rate
+    /// still locks onto the preamble and then decodes noise.
+    #[arg(long, default_value_t = DEFAULT_SYMBOL_RATE)]
+    pub symbol_rate: u32,
+    #[command(flatten)]
+    pub variants: VariantArgs,
 }
 
 /// DSP variant toggles. All default to OFF (trunk baseline). The `rank`
@@ -137,51 +136,145 @@ pub enum Profile { Audible, Ultrasonic }
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Send { profile, variants, input, tui, plain } => {
+        Cmd::Send { phy, input, tui, plain } => {
             let want_tui = tui || (!plain && std::io::stdout().is_terminal());
             if want_tui {
-                let mut r = TuiReporter::new_tx(profile)?;
-                cmd_send::run(profile, variants.into(), input, &mut r)
+                let mut r = TuiReporter::new_tx(phy.profile)?;
+                cmd_send::run(phy.into(), input, &mut r)
             } else {
                 let mut r = PlainReporter;
-                cmd_send::run(profile, variants.into(), input, &mut r)
+                cmd_send::run(phy.into(), input, &mut r)
             }
         }
-        Cmd::Recv { profile, variants, output, hex, tui, plain } => {
+        Cmd::Recv { phy, output, hex, tui, plain } => {
             let want_tui = tui || (!plain && std::io::stdout().is_terminal());
             if want_tui {
-                let mut r = TuiReporter::new_rx(profile)?;
-                cmd_recv::run(profile, variants.into(), output, hex, &mut r)
+                let mut r = TuiReporter::new_rx(phy.profile)?;
+                cmd_recv::run(phy.into(), output, hex, &mut r)
             } else {
                 let mut r = PlainReporter;
-                cmd_recv::run(profile, variants.into(), output, hex, &mut r)
+                cmd_recv::run(phy.into(), output, hex, &mut r)
             }
         }
-        Cmd::TxWav { profile, symbol_rate, variants, input, output } => {
-            cmd_tx_wav::run(profile, symbol_rate, variants.into(), input, output)
-        }
-        Cmd::RxWav { profile, symbol_rate, variants, input, output, hex } => {
-            cmd_rx_wav::run(profile, symbol_rate, variants.into(), input, output, hex)
-        }
+        Cmd::TxWav { phy, input, output } => cmd_tx_wav::run(phy.into(), input, output),
+        Cmd::RxWav { phy, input, output, hex } => cmd_rx_wav::run(phy.into(), input, output, hex),
         Cmd::Rank { corpus } => cmd_rank::run(corpus),
-        Cmd::Chat { profile, variants } => cmd_chat::run(profile, variants.into()),
+        Cmd::Chat { phy } => cmd_chat::run(phy.into()),
     }
 }
 
-/// Build a PHY at the default 50 sym/s. Live audio (`send`, `recv`, `chat`)
-/// and the Android app are still fixed at that rate; only the offline WAV
-/// pair and `rank` can work at another. See docs/android-smoke-test.md.
-pub fn make_phy(profile: Profile, variants: DspVariants) -> modem_core::phy::FskPhy {
-    make_phy_at(profile, DEFAULT_SYMBOL_RATE, variants)
+/// Everything needed to build the PHY a command runs on, travelling as one
+/// value. There is deliberately no rate-less constructor: a command cannot be
+/// handed a symbol rate and then quietly build its PHY at the default, which
+/// is the bug that kept live audio pinned to 50 sym/s.
+#[derive(Clone, Copy)]
+pub struct PhySpec {
+    pub profile: Profile,
+    /// Symbols per second. Must divide 48 kHz exactly; `modem_core` panics
+    /// otherwise rather than misreport the rate it runs at.
+    pub symbol_rate: u32,
+    pub variants: DspVariants,
 }
 
-pub fn make_phy_at(
-    profile: Profile,
-    symbol_rate: u32,
-    variants: DspVariants,
-) -> modem_core::phy::FskPhy {
-    match profile {
-        Profile::Audible => modem_core::phy::FskPhy::audible_at(symbol_rate, variants),
-        Profile::Ultrasonic => modem_core::phy::FskPhy::ultrasonic_at(symbol_rate, variants),
+impl From<PhyArgs> for PhySpec {
+    fn from(a: PhyArgs) -> Self {
+        PhySpec {
+            profile: a.profile,
+            symbol_rate: a.symbol_rate,
+            variants: a.variants.into(),
+        }
+    }
+}
+
+impl PhySpec {
+    pub fn phy(&self) -> modem_core::phy::FskPhy {
+        match self.profile {
+            Profile::Audible => {
+                modem_core::phy::FskPhy::audible_at(self.symbol_rate, self.variants)
+            }
+            Profile::Ultrasonic => {
+                modem_core::phy::FskPhy::ultrasonic_at(self.symbol_rate, self.variants)
+            }
+        }
+    }
+
+    /// The config of the PHY this spec builds — tone frequencies, sample rate,
+    /// symbol length. Read off a real PHY so it cannot drift from `phy()`.
+    pub fn config(&self) -> modem_core::fsk::FskConfig {
+        *self.phy().config()
+    }
+
+    pub fn ultrasonic(&self) -> bool {
+        matches!(self.profile, Profile::Ultrasonic)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec_from(args: &[&str]) -> PhySpec {
+        let cli = Cli::try_parse_from(args).expect("argv should parse");
+        match cli.cmd {
+            Cmd::Send { phy, .. }
+            | Cmd::Recv { phy, .. }
+            | Cmd::TxWav { phy, .. }
+            | Cmd::RxWav { phy, .. }
+            | Cmd::Chat { phy } => phy.into(),
+            Cmd::Rank { .. } => panic!("rank builds a PHY per capture, not from argv"),
+        }
+    }
+
+    /// One argv per subcommand that reaches the modem, with the positional
+    /// arguments each one requires.
+    fn argv_for(cmd: &str) -> Vec<&str> {
+        match cmd {
+            "tx-wav" => vec!["modem", "tx-wav", "in.bin", "out.wav"],
+            "rx-wav" => vec!["modem", "rx-wav", "in.wav"],
+            _ => vec!["modem", cmd],
+        }
+    }
+
+    const PHY_COMMANDS: [&str; 5] = ["send", "recv", "chat", "tx-wav", "rx-wav"];
+
+    /// `--symbol-rate` must reach the PHY on every command, live audio
+    /// included. Asserted through the built PHY's symbol length, not through
+    /// the parsed field: a rate that is accepted and then ignored would leave
+    /// the field set to 25 and the symbols 960 samples long.
+    #[test]
+    fn every_command_passes_the_symbol_rate_to_the_phy() {
+        for cmd in PHY_COMMANDS {
+            let mut argv = argv_for(cmd);
+            argv.extend(["--symbol-rate", "25"]);
+            let spec = spec_from(&argv);
+            assert_eq!(spec.symbol_rate, 25, "{cmd}");
+            assert_eq!(spec.config().symbol_rate(), 25, "{cmd} built the wrong PHY");
+            assert_eq!(spec.config().symbol_samples, 1920, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn every_command_defaults_to_the_default_symbol_rate() {
+        for cmd in PHY_COMMANDS {
+            let spec = spec_from(&argv_for(cmd));
+            assert_eq!(spec.symbol_rate, DEFAULT_SYMBOL_RATE, "{cmd}");
+            assert_eq!(spec.config().symbol_rate(), DEFAULT_SYMBOL_RATE, "{cmd}");
+            assert_eq!(spec.config().symbol_samples, 960, "{cmd}");
+        }
+    }
+
+    /// The rate is a timing change only: it must not disturb the profile's
+    /// tones, and it must compose with the DSP variant flags.
+    #[test]
+    fn the_rate_is_orthogonal_to_profile_and_variants() {
+        let slow = spec_from(&[
+            "modem", "chat", "--profile", "ultrasonic", "--symbol-rate", "25",
+            "--pulse-shape", "--matched-filter",
+        ]);
+        assert!(slow.ultrasonic());
+        assert_eq!(slow.config().symbol_rate(), 25);
+        assert_eq!(slow.config().tone_freqs[0], 17_500.0);
+        assert!(slow.variants.pulse_shape && slow.variants.matched_filter);
+        assert!(!slow.variants.timing_recovery);
     }
 }

@@ -1,16 +1,13 @@
 use crate::output_format::{is_printable, print_hex};
-use crate::{make_phy_at, Profile};
+use crate::PhySpec;
 use hound::WavReader;
 use modem_codec::rx::{FrameEvent, Receiver};
-use modem_core::fsk::DspVariants;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
 pub fn run(
-    profile: Profile,
-    symbol_rate: u32,
-    variants: DspVariants,
+    spec: PhySpec,
     input: PathBuf,
     output: Option<PathBuf>,
     hex: bool,
@@ -24,8 +21,7 @@ pub fn run(
             .collect(),
     };
 
-    let phy = make_phy_at(profile, symbol_rate, variants);
-    let mut rx = Receiver::new(phy);
+    let mut rx = Receiver::new(spec.phy());
     let events = rx.push_samples(&samples);
 
     let bytes: Vec<u8> = events.into_iter().find_map(|e| match e {
