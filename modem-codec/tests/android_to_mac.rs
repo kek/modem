@@ -338,8 +338,8 @@ fn halving_the_symbol_rate_is_not_a_cure_for_a_wet_room() {
 ///
 /// The chirp is a fixed 80 ms waveform that knows nothing about symbols, so it
 /// correlates identically at either rate — verified here on the actual
-/// channel, not argued from the source. The real Android→Mac captures scored
-/// 0.28-0.35 on the preamble where this model scores ~0.86, and whatever
+/// channel, not argued from the source. The real Android→Mac captures score
+/// 0.295-0.651 on the preamble where this model scores ~0.86, and whatever
 /// attacks the real chirp that hard is therefore *untouched* by this change.
 /// A simulated pass at 25 sym/s is a reason to go and capture, not a fix.
 #[test]
@@ -360,7 +360,7 @@ fn symbol_rate_does_not_change_the_preamble() {
     assert!(
         fast.1 > 0.8,
         "the model's chirp survives this room easily (score {:.3}) — far better \
-         than the 0.28-0.35 the real captures showed. That gap is unexplained \
+         than the 0.295-0.651 the real captures show. That gap is unexplained \
          and no symbol-rate change can close it.",
         fast.1
     );

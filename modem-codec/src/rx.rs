@@ -77,12 +77,21 @@ impl<P: Phy> Receiver<P> {
                     // specific synthetic case; real ambient noise scores
                     // lower). Clean-channel scores are >0.9. Real over-the-air
                     // through a Pixel speaker into a MacBook mic peaks at
-                    // 0.295-0.629, measured over the six captures ranked in
-                    // docs/android-smoke-test.md. Note this accepts the *first*
-                    // window over threshold, not the peak, so the offset it
-                    // locks on can score below that (0.259 vs 0.295 on the
-                    // worst capture, a 76-sample-early lock). The sync word +
-                    // RS+CRC catch false positives that get past this.
+                    // 0.295-0.651, measured over the six captures ranked in
+                    // docs/android-smoke-test.md.
+                    //
+                    // The threshold is applied to the *peak*, not to the
+                    // leading edge of the correlation ramp: detect_preamble
+                    // searches all of `slice` for the maximum and only then
+                    // returns, and `slice` always extends `payload_samples`
+                    // (13.9 s at 50 sym/s) behind the newest sample, so every
+                    // candidate offset is examined with the whole chirp and its
+                    // neighbourhood already buffered. A comment here used to
+                    // claim this accepted the first window over threshold; it
+                    // does not, and never did — measured on all six captures at
+                    // whole-file, 4800- and 1024-sample chunking, the lock lands
+                    // exactly on the peak. The sync word + RS+CRC catch false
+                    // positives that get past this.
                     if score > 0.25 {
                         // Drop everything up to and including the preamble.
                         self.buffer.drain(..off + tn);

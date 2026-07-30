@@ -22,8 +22,10 @@
 > - **Not one of the 48 `(capture, variant)` cells failed on the sync word.**
 > - The dominant real failure is `crc_fail` — RS reporting success and the CRC32
 >   disagreeing — not `rs_fail`.
-> - The real preamble correlates at **0.295–0.629** over these six, not
->   0.28–0.35.
+> - The real preamble correlates at **0.295–0.651** over these six, not
+>   0.28–0.35. (0.295–0.629 as first published; the top of the range was itself
+>   understated by the coarse correlation scan — see "The preamble gap is real
+>   but half the size we said".)
 >
 > Numbers, command and output: "What the six real captures say" below. The
 > honest status of Android→Mac is **an unreliable link, around half to two
@@ -181,12 +183,48 @@ failures at all. With n=6 that agreement should not be leant on, but the model i
 not the wild optimist this page implied — outside the preamble.
 
 **The preamble gap is real but half the size we said.** Measured peak
-correlation over the six is 0.295–0.629 (mean ≈ 0.48) against ~0.86 modelled.
+correlation over the six is 0.295–0.651 (mean ≈ 0.55) against ~0.86 modelled.
 The 0.28–0.35 figure this page has quoted throughout came from the bottom of
-that range. Part of the discrepancy is that the streaming receiver accepts the
-*first* window over 0.25 rather than the peak, so what it locks on can score
-below the true peak — 0.259 versus 0.295 on capture 001, a 76-sample-early lock.
-Reproduced with `modem_core::preamble::detect_preamble` over each WAV.
+that range. Reproduced with `modem_core::preamble::detect_preamble` over each
+WAV.
+
+> **Corrected again 2026-07-30.** This paragraph used to add: "Part of the
+> discrepancy is that the streaming receiver accepts the *first* window over
+> 0.25 rather than the peak, so what it locks on can score below the true peak —
+> 0.259 versus 0.295 on capture 001, a 76-sample-early lock." **The receiver
+> does not do that.** `detect_preamble` scans the entire searchable window for
+> the maximum and returns only that; `Receiver::step` then applies the 0.25
+> threshold to the peak. The 0.259/0.295/76-samples figures are real numbers —
+> 0.2593 at offset 116384 is genuinely the first stride-4 window over 0.25 on
+> capture 001, and the peak is genuinely 0.2947 at 116460 — but they were
+> misattributed: the receiver locks on 116460, not 116384. Verified on all six
+> captures at whole-file, 4800-sample and 1024-sample chunking: the lock offset
+> and score equal the peak offset and score in every case. It cannot differ,
+> structurally — `Receiver::step` will not search an offset until
+> `payload_samples` (13.9 s at 50 sym/s) of audio *after* it is buffered, so no
+> candidate is ever judged on a partially-arrived correlation ramp.
+>
+> Forcing the misbehaviour costs nothing either. Chunking the feed to cut
+> exactly at each capture's first-crossing offset (so the peak is not yet
+> searchable) makes the receiver lock 76/8/12/0/0/0 samples early on captures
+> 001–006 — and every one of the six decodes to the same outcome as before
+> (`rs_fail`, `crc_fail`, `ok`, `ok`, `crc_fail`, `ok`). A first-crossing lock of
+> that size is not a mechanism in the preamble gap, and fixing one would not
+> have bought a single cell.
+>
+> What *was* mechanical, and is now fixed: the scan strides 4 samples, and a
+> 1.5–6 kHz chirp's correlation peak is ~10 samples wide with fine structure at
+> the ~3.75 kHz centre frequency, so the best stride-4 grid point can be up to 3
+> samples off true alignment **and score far below the real peak**. Refining the
+> coarse winner over ±3 samples at full resolution moves four of the six
+> captures onto a better offset and raises the measured range from 0.295–0.629
+> (mean 0.48) to 0.295–0.651 (mean 0.55): 001 0.2947 (unchanged), 002 0.3877 →
+> 0.5794, 003 0.4514 → 0.5918, 004 0.6290 → 0.6510, 005 0.6130 (unchanged), 006
+> 0.4984 → 0.5914. So roughly a fifth of the gap this page has been calling
+> mysterious was the measurement, not the channel. **It changes no decode
+> outcome:** the rank output over the six captures is cell-for-cell identical
+> before and after (`baseline` 3/6, `m` 4/6), which is expected — 3 samples is
+> 0.3% of a 960-sample symbol, far inside what the demodulator tolerates.
 
 ## Why 25 sym/s cannot be tested against these captures
 
@@ -359,13 +397,14 @@ micro-speakers are quoted at, and asserted by
 does not match the real capture in every respect. In particular it gets the
 preamble wrong, and in the *optimistic* direction: the modelled chirp correlates
 at ~0.86 at the nominal room and still ~0.85 at the `live` tier — it never
-struggles at all. The six real Android→Mac captures peak at **0.295–0.629**
-(mean ≈ 0.48) — degraded but locking — which the model never reproduces.
+struggles at all. The six real Android→Mac captures peak at **0.295–0.651**
+(mean ≈ 0.55) — degraded but locking — which the model never reproduces.
 Something in the real path attacks the chirp harder than reverberation does, and
 that part is still unexplained. (This paragraph used to quote the real range as
-0.28–0.35, i.e. only the bottom of it; measured values per capture are in "What
-the six real captures say". The gap is genuine and about half as wide as
-previously stated.)
+0.28–0.35, i.e. only the bottom of it, and then 0.295–0.629, which was measured
+on a stride-4 scan too coarse to see the peak of a chirp correlation; measured
+values per capture are in "What the six real captures say". The gap is genuine
+and roughly half as wide as first stated.)
 
 (An earlier version of this paragraph said the modelled chirp falls under the
 0.25 threshold at the `live` tier, and attributed the harness's `no_preamble`
