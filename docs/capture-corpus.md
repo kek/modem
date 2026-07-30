@@ -45,6 +45,17 @@ Trim the result if there's excessive silence at the start or end — the
 preamble detector works fine with leading silence, but anything longer
 than ~5 s is just wasted CPU.
 
+**Record long enough for one whole frame, with margin.** A frame is 261 bytes
+over the air (2 sync + 259), i.e. 696 symbols, so its air time scales with the
+symbol rate: **14.0 s at 50 sym/s, 27.9 s at 25 sym/s.** The `trim 0 22` above
+is right for 50 and would truncate a 25 sym/s frame — use `trim 0 32` there.
+This matters more than it looks, because `Receiver::step` will not start
+searching for a preamble until it holds `preamble + payload_samples`, so a
+capture shorter than one frame produces `no_preamble` for every variant. **A
+too-short recording is indistinguishable in the rank output from a signal that
+never arrived.** If a whole corpus reads `no_preamble=N/N`, check the durations
+and the `symbol_rate` field before suspecting the DSP.
+
 ## Manifest schema
 
 `captures/manifest.toml` is the index of your corpus. Append an entry per

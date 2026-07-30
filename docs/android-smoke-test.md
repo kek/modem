@@ -6,17 +6,42 @@
 - **WAV file roundtrip on either platform:** `modem tx-wav` produces a 48 kHz mono float WAV; `modem rx-wav` decodes it byte-identically. Pure DSP path, no audio hardware required.
 - **Mac → Android over-the-air (audible):** ✅ decoded byte-identically with SHA-256 verification, with the phone mic ~20–30 cm from a MacBook speaker at ~75% volume in a quiet room.
 - **Mac → Android over-the-air (ultrasonic):** ✅ decoded byte-identically. Inaudible to humans, no annoying warble.
+- **Android → Mac over-the-air (audible):** ⚠️ **intermittent, but it does work.** 3 of the 6 real captures on this machine decode byte-identically with SHA-256 verification and *no DSP remedies at all*; 4 of 6 with the matched filter. Measured over the air, not modelled — see "What the six real captures say".
 - **Android app:** Pixel 8 Pro / Android 16, builds and installs, captures via `AudioSource.UNPROCESSED`, plays via `AudioTrack` on the FAST low-latency path bypassing Android's Dynamics Processing Effect. The app shows an inline visualization (8-tone Goertzel bar meter + frame-event chip strip + watchdog readout) on every Send and Receive, mirroring the CLI's ratatui dashboard.
 
-## What does not work yet — Android → Mac
+## Android → Mac — intermittent, not broken
 
-The Mac receiver locks onto the preamble (correlation score ~0.28–0.35) and starts decoding the frame body, but the demodulated sync word always has 1–4 bit errors and the rest of the frame exceeds RS's 16-byte recovery budget (RsUncorrectable). The same is true on both audible and ultrasonic profiles.
+> **Corrected 2026-07-30, by ranking the six real captures that were sitting in
+> `captures/` unanalysed.** This section used to read "What does not work yet —
+> Android → Mac", and to state that the demodulated sync word *always* had 1–4
+> bit errors and the frame *always* exceeded RS's budget. Neither claim survives
+> contact with the recordings:
+>
+> - 3 of the 6 real captures decode **byte-identically, SHA-256 verified, under
+>   plain `baseline`** — no remedies at all. 4 of 6 with the matched filter.
+> - **Not one of the 48 `(capture, variant)` cells failed on the sync word.**
+> - The dominant real failure is `crc_fail` — RS reporting success and the CRC32
+>   disagreeing — not `rs_fail`.
+> - The real preamble correlates at **0.295–0.629** over these six, not
+>   0.28–0.35.
+>
+> Numbers, command and output: "What the six real captures say" below. The
+> honest status of Android→Mac is **an unreliable link, around half to two
+> thirds of frames**, not a dead one. On six captures, so the rate itself is
+> soft. Everything below about inter-symbol interference still stands as the
+> explanation for the frames that *do* fail — it is now an explanation of a
+> failure rate rather than of a total failure.
+
+The Mac receiver locks onto the preamble and starts decoding the frame body; on
+the captures that fail, the body exceeds what Reed–Solomon can put right. The
+same was reported on both audible and ultrasonic profiles (only `audible` is
+represented in the real corpus).
 
 Original hypothesis: the Pixel 8 Pro's small built-in speaker produces enough harmonic distortion at our tone frequencies that the demodulated symbols pick up neighbour-tone energy. The Mac's built-in mic + macOS audio input processing doesn't help.
 
 **That hypothesis does not survive simulation — see "What the DSP tuning pass actually bought" below.** Speaker distortion on its own, modelled well past what a real micro-speaker does, costs zero bit errors. What does reproduce this exact symptom is multi-symbol inter-symbol interference from ordinary room reverberation.
 
-**Best candidate fix so far: halve the symbol rate to 25 sym/s.** In simulation that clears the whole corpus where the DSP tuning pass reached 75%, at the cost of half the bitrate (150 → 75 bps). Not yet confirmed over the air — see "What halving the symbol rate to 25 sym/s buys" below.
+**Best candidate fix so far: halve the symbol rate to 25 sym/s.** In simulation that clears the whole corpus where the DSP tuning pass reached 75%, at the cost of half the bitrate (150 → 75 bps). Not yet confirmed over the air — see "What halving the symbol rate to 25 sym/s buys" below. **And it cannot be confirmed against the captures we have**: the rate is baked into the air signal, so those six recordings can only ever be decoded at the 50 sym/s they were sent at. See "Why 25 sym/s cannot be tested against these captures".
 
 Evidence that the path itself is OK:
 - Phone media volume at 25/25, AudioTrack via `AUDIO_OUTPUT_FLAG_FAST` (verified in logcat), no Dynamics Processing Effect engaged.
@@ -52,6 +77,166 @@ echo "hello from the Mac" | ./target/release/modem send
 # … wait ~16 s (14 s transmission + decode time).
 # Phone screen displays "19 bytes · sha256 ok / hello from the Mac".
 ```
+
+## What the six real captures say
+
+**This is the only section on this page whose numbers came out of a microphone.**
+Everything under "What the DSP tuning pass actually bought" and "What halving the
+symbol rate to 25 sym/s buys" is simulated. This is not.
+
+Six real Android→Mac recordings have been sitting in `captures/` since
+2026-05-17, from the session that produced the original "does not work"
+verdict. They are gitignored (`docs/capture-corpus.md` explains why) and they
+had **never been run through `modem rank`** — even though the harness was
+written the same morning, authored at 12:01 and merged at 15:26, so it existed
+before the first of these recordings at 12:48 and was simply never pointed at
+them. They were ranked for the first time on 2026-07-30. The result contradicts
+what this page had been claiming for two months.
+
+### The corpus
+
+All six: Pixel 8 Pro transmitting, MacBook built-in mic recording, `audible`
+profile, 22.0 s at 48 kHz mono f32 (4.2 MB each), payload `hello from Android`,
+50 sym/s. `captures/manifest.toml` carries no `symbol_rate` field, which means
+50 — correct for these, since they predate the rate being adjustable at all.
+
+| Capture | TX side | Preamble peak | `baseline` | `+m` |
+|---|---|---|---|---|
+| `android-to-mac-001.wav` | rectangular, vol 22/25 | 0.295 | `rs_fail` | `rs_fail` |
+| `android-to-mac-002-tx-pulse.wav` | pulse-shaped, vol 25/25 | 0.388 | `crc_fail` | **`ok`** |
+| `android-to-mac-003-tx-base-vol25.wav` | rectangular, vol 25/25 | 0.451 | **`ok`** | **`ok`** |
+| `android-to-mac-004-tx-base-vol25.wav` | rectangular, vol 25/25 | 0.629 | **`ok`** | **`ok`** |
+| `android-to-mac-005-tx-pulse-vol25.wav` | pulse-shaped, vol 25/25 | 0.613 | `crc_fail` | `crc_fail` |
+| `android-to-mac-006-tx-pulse-vol25.wav` | pulse-shaped, vol 25/25 | 0.498 | **`ok`** | **`ok`** |
+
+`ok` means what `docs/capture-corpus.md` says it means: `StreamComplete`,
+SHA-256 matched, decoded bytes equal to `hello from Android`. Confirmed outside
+the harness too — `modem rx-wav captures/android-to-mac-003-tx-base-vol25.wav`
+prints `hello from Android` on its own, and 002 does the same with
+`--matched-filter`.
+
+### The measurement
+
+```bash
+cargo build --release
+./target/release/modem rank captures/
+```
+
+(Ranked on 2026-07-30 against a read-only copy of the six, to keep the
+irreplaceable originals out of reach of the harness. Same files, verified by
+SHA-256 before and after.)
+
+```text
+SUMMARY rate=50 variant=baseline ok=3/6 crc_fail=2 rs_fail=1
+SUMMARY rate=50 variant=m        ok=4/6 crc_fail=1 rs_fail=1
+SUMMARY rate=50 variant=m+t      ok=4/6 crc_fail=1 rs_fail=1
+SUMMARY rate=50 variant=p        ok=3/6 crc_fail=2 rs_fail=1
+SUMMARY rate=50 variant=p+m      ok=4/6 crc_fail=1 rs_fail=1
+SUMMARY rate=50 variant=p+m+t    ok=4/6 crc_fail=1 rs_fail=1
+SUMMARY rate=50 variant=p+t      ok=3/6 crc_fail=2 rs_fail=1
+SUMMARY rate=50 variant=t        ok=3/6 crc_fail=2 rs_fail=1
+```
+
+### What that overturns
+
+**Android→Mac is not a dead direction.** Half the real captures decode with no
+remedies whatsoever. The claim this page made — preamble locks, sync word
+*always* wrong by 1–4 bits, body *always* past the RS budget — was never true of
+these files.
+
+Nor can a later fix explain it away. `modem-core` and `modem-codec` have changed
+exactly twice on the demodulation path since 2026-05-17, and neither change can
+turn a failure into a decode: one added `goertzel_bank`, a visualization helper
+that the receiver does not call, and the other is yesterday's symbol-rate
+parameterization, which at rate 50 is a pure refactor — `SAMPLE_RATE / 50`
+became `symbol_samples_for(50)`, the same 960 samples. **These captures would
+have decoded on the day they were made.** The original verdict came from live
+microphone sessions, and the recordings made alongside it were never checked
+against it.
+
+**No cell failed on the sync word.** Zero `sync_fail` and zero `no_preamble`
+across all 48 cells. Every real failure is a frame-body failure after a good
+preamble lock and a good sync word — which is exactly what the simulated corpus
+also shows, and it is the one part of the old story that the real data confirms.
+
+**`m` is the only remedy that does anything, and it is worth one capture.**
+`t` changes not a single cell on any of the six. `p` is a no-op at RX exactly as
+`docs/capture-corpus.md` predicts (`p` ≡ `baseline`, `p+m` ≡ `m`, `p+m+t` ≡
+`m+t`, cell for cell). So on real data `p+m+t` is indistinguishable from plain
+`m`, and the "best combination: `p+m+t`" conclusion reduces to "turn the matched
+filter on".
+
+**A strong preamble does not predict a decodable body.** Capture 005 has the
+second-best chirp correlation of the six (0.613) and never decodes under any
+variant; capture 003 locks at 0.451 and decodes under all eight. Whatever kills
+005's body is not attacking the chirp.
+
+### What it does *not* overturn
+
+**The channel model's aggregate hit rate is closer to reality than expected.**
+Real `baseline` is 3/6 (50%) against 14/24 (58%) simulated, and real best is 4/6
+(67%) against 18/24 (75%) simulated. The failure *mix* lines up too: both are
+dominated by `crc_fail`, with a minority of `rs_fail` and no preamble or sync
+failures at all. With n=6 that agreement should not be leant on, but the model is
+not the wild optimist this page implied — outside the preamble.
+
+**The preamble gap is real but half the size we said.** Measured peak
+correlation over the six is 0.295–0.629 (mean ≈ 0.48) against ~0.86 modelled.
+The 0.28–0.35 figure this page has quoted throughout came from the bottom of
+that range. Part of the discrepancy is that the streaming receiver accepts the
+*first* window over 0.25 rather than the peak, so what it locks on can score
+below the true peak — 0.259 versus 0.295 on capture 001, a 76-sample-early lock.
+Reproduced with `modem_core::preamble::detect_preamble` over each WAV.
+
+## Why 25 sym/s cannot be tested against these captures
+
+Ranking the real corpus "at both rates" is not a thing that can be done, and a
+table claiming it would be worthless. Two independent reasons, both measured:
+
+**1. The rate is baked into the air.** These recordings contain a 50 sym/s
+signal. A 25 sym/s receiver reading them is integrating over 1920-sample windows
+that each straddle two transmitted symbols — it is not decoding a slow
+transmission, it is decoding the wrong thing. Pinned in the abstract by
+`rank_at_the_wrong_symbol_rate_decodes_nothing`, and directly on real data:
+
+```bash
+./target/release/modem rx-wav --symbol-rate 25 captures/android-to-mac-003-tx-base-vol25.wav
+# Error: no complete stream received      # decodes fine at the default 50
+```
+
+**2. The recordings are too short to hold a 25 sym/s frame at all.** One frame
+is 261 bytes over the air (2 sync + 259), i.e. 696 symbols; at 1920 samples per
+symbol that is 1,336,320 samples, plus 3,840 for the chirp — **27.92 s**. These
+captures are 22.0 s (1,056,003 samples). `Receiver::step` will not even begin
+searching for a preamble until the buffer holds `preamble + payload_samples`, so
+a 25 sym/s receiver on a 22 s file returns before looking at anything. That is
+why relabelling the manifest `symbol_rate = 25` produces this, and why it says
+nothing about 25 sym/s:
+
+```text
+SUMMARY rate=25 variant=baseline ok=0/6 no_preamble=6      # ... and the same for all 8 variants
+```
+
+`no_preamble=6` there is a file-length artifact, not a DSP result. It is a
+useful trap to know about: **a capture shorter than one frame reads as a signal
+failure.**
+
+**So the simulated 25 sym/s result stands entirely unconfirmed, and this corpus
+cannot confirm it.** What it needs is a new over-the-air recording, which needs
+three things: the Android app to offer the rate (`ModemViewModel` still calls the
+rate-less `FfiTransmitter` / `FfiReceiver` constructors), a phone and a quiet
+room, and **a recording at least ~32 s long** — the 22 s in the
+`docs/capture-corpus.md` recipe would truncate a 25 sym/s frame.
+
+One thing the real data does say about the *case* for 25 sym/s: the argument for
+it is unchanged in mechanism and weaker in urgency. Unchanged, because every
+real failure is a frame-body failure after a clean lock — ISI is what 25 sym/s
+attacks, and the real corpus is consistent with ISI being the limiter. Weaker,
+because the trade is no longer "a link that works at half speed versus one that
+doesn't". It is "an unreliable link at 150 bps versus an unmeasured one at
+75 bps". A second thing worth measuring before spending a recording session on
+the rate: **more captures at 50**, because a 3-of-6 success rate on six files is
+barely a number.
 
 ## What the DSP tuning pass actually bought
 
@@ -158,9 +343,12 @@ Be clear about this, because the two are not interchangeable:
 
 - **Over the air (real):** everything in "What works today", and the
   Android→Mac failure itself. Observed on a Pixel 8 Pro and a MacBook.
-- **Simulated (not over the air):** every result in this section. There are no
-  real Android→Mac captures in `captures/` on this machine, so nothing here was
-  ranked against a genuine recording. The corpus is synthesised by
+- **Simulated (not over the air):** every result in this section. It was ranked
+  only against a synthesised corpus. (This used to read "there are no real
+  Android→Mac captures in `captures/` on this machine" — **that was false when
+  written.** Six had been there since 2026-05-17; they were simply never ranked.
+  They have been now: see "What the six real captures say", which supersedes this
+  bullet.) The corpus is synthesised by
   `cargo run --release -p modem-codec --example gen_sim_corpus -- captures/simulated`,
   which pushes generated transmissions through the modelled channel.
 
@@ -171,20 +359,26 @@ micro-speakers are quoted at, and asserted by
 does not match the real capture in every respect. In particular it gets the
 preamble wrong, and in the *optimistic* direction: the modelled chirp correlates
 at ~0.86 at the nominal room and still ~0.85 at the `live` tier — it never
-struggles at all. The real Android→Mac captures sat at 0.28–0.35 — degraded but
-locking — which the model never reproduces. Something in the real path attacks
-the chirp far harder than reverberation does, and that part is still unexplained.
+struggles at all. The six real Android→Mac captures peak at **0.295–0.629**
+(mean ≈ 0.48) — degraded but locking — which the model never reproduces.
+Something in the real path attacks the chirp harder than reverberation does, and
+that part is still unexplained. (This paragraph used to quote the real range as
+0.28–0.35, i.e. only the bottom of it; measured values per capture are in "What
+the six real captures say". The gap is genuine and about half as wide as
+previously stated.)
 
 (An earlier version of this paragraph said the modelled chirp falls under the
 0.25 threshold at the `live` tier, and attributed the harness's `no_preamble`
 counts to that. Both halves were wrong; see "A correction to the harness,
 found on the way" below.)
 
-**So: the conclusion that `p+m+t` is the best combination has not been confirmed
-against a real Android→Mac recording.** Doing so is the obvious next step, and
-needs nothing more than a phone, a quiet room, and `docs/capture-corpus.md`.
-A capture that reproduces the 0.28–0.35 preamble score would also settle what
-the model is missing.
+**The conclusion that `p+m+t` is the best combination has now been checked
+against the real recordings, and it does not hold in the form stated.** On the
+six real captures `t` changes no cell at all and `p` is a no-op at RX, so
+`p+m+t` is cell-for-cell identical to plain `m` — the matched filter is the
+whole of the gain, and it is worth one capture out of six (3/6 → 4/6). See "What
+the six real captures say". The simulated ranking is not wrong about `m`
+carrying the weight; it overstated what `t` adds.
 
 ### Reproducing all of the above
 
@@ -357,13 +551,22 @@ exactly like the profile does. So:
 
 ### So is Android→Mac fixed?
 
-**No — it is worth a real capture, which is a different claim.** Everything in
+**No, and 25 sym/s is not what fixed the part of it that works.** Everything in
 this section is simulated, on a model whose preamble behaviour is known not to
-match the real captures (~0.86 modelled versus 0.28–0.35 observed). A clean
+match the real captures (~0.86 modelled versus 0.295–0.629 measured). A clean
 24/24 in simulation is the strongest signal any remedy has produced for this
 direction, and it is the reason to go and record, not a substitute for having
-recorded. The honest status of Android→Mac remains: broken over the air, with
-one promising and cheap candidate fix now identified and costed.
+recorded.
+
+Two separate updates to the honest status, both from the real captures:
+
+- Android→Mac is **intermittent rather than broken** at the rate we already ship:
+  3/6 real captures at `baseline`, 4/6 with the matched filter. That has nothing
+  to do with 25 sym/s and was true before any of this work.
+- 25 sym/s **cannot be tested against the corpus on disk**, for two measured
+  reasons — see "Why 25 sym/s cannot be tested against these captures". It
+  remains a simulation-only result, and confirming it needs a fresh recording
+  from a phone that can transmit at 25 sym/s, at least ~32 s long.
 
 ## Why we don't simply lower tone count further
 

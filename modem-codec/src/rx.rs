@@ -75,9 +75,14 @@ impl<P: Phy> Receiver<P> {
                     // Threshold 0.25 — near the verified pure-noise ceiling
                     // (preamble.rs::rejects_pure_noise asserts <0.3 for a
                     // specific synthetic case; real ambient noise scores
-                    // lower). Clean-channel scores are >0.9, real over-the-air
-                    // through small speaker+mic chains is ~0.28-0.4. The sync
-                    // word + RS+CRC catch false positives that get past this.
+                    // lower). Clean-channel scores are >0.9. Real over-the-air
+                    // through a Pixel speaker into a MacBook mic peaks at
+                    // 0.295-0.629, measured over the six captures ranked in
+                    // docs/android-smoke-test.md. Note this accepts the *first*
+                    // window over threshold, not the peak, so the offset it
+                    // locks on can score below that (0.259 vs 0.295 on the
+                    // worst capture, a 76-sample-early lock). The sync word +
+                    // RS+CRC catch false positives that get past this.
                     if score > 0.25 {
                         // Drop everything up to and including the preamble.
                         self.buffer.drain(..off + tn);
