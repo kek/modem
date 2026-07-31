@@ -230,7 +230,8 @@ WAV.
 > `Receiver::step` used to scan every stride-4 offset in whatever was buffered —
 > `buffer.len() - payload_samples` offsets, which is 126 s of audio when a
 > ten-frame file is pushed in one call, re-run whole after every frame. It now
-> scans at most `LOOK_BACK_SECONDS` (1 s, 12 000 windows) per scan and slides,
+> scans at most `LOOK_BACK_MILLIS` (then 1 s, 12 000 windows; now 250 ms — see
+> the note below) per scan and slides,
 > retiring the offsets it has rejected, so a stream is swept once instead of
 > once per frame. Measured on this corpus, the lock does not move: all six
 > captures return the same offset *and* the same score as the unbounded scan
@@ -253,6 +254,67 @@ WAV.
 > 96620/0.6130 → 96637/0.4360 — which the rank output survived (same eight
 > outcomes) but which throws away a third of capture 001's margin over the
 > threshold for nothing.
+
+> **Added 2026-07-31, later: the bound is 250 ms, and the corpus is what says
+> so.** The window length is the whole remaining cost of a scan, because the scan
+> searches all of it for a maximum even when the chirp sits at offset 0 — which
+> it does for every frame after the first. Shortening it from 1 s to 250 ms
+> divides that cost by four and moves nothing: **all six captures lock on the
+> same offset and the same score, and produce the same decode outcome** (001
+> 116460/0.2947 `rs_fail`, 002 92113/0.5794 `crc_fail`, 003 91147/0.5918 `ok`,
+> 004 94573/0.6510 `ok`, 005 96620/0.6130 `crc_fail`, 006 93845/0.5914 `ok`).
+> Capture 001 keeps its whole 0.0447 of margin over the 0.25 threshold.
+>
+> **The evidence for 250 ms, measured rather than assumed.** The bound exists so
+> that a smeared early arrival of a chirp is still compared against the same
+> chirp arriving by a later path, so the question it answers is: *in these rooms,
+> what is the latest-arriving energy that still correlates?* Reproduce with
+>
+> ```bash
+> cargo run --release -p modem-codec --example preamble_probe -- captures
+> ```
+>
+> which scans each capture at full resolution and reports, per capture, the lock
+> (through `Receiver::locks()`, in recording coordinates), the unbounded peak,
+> the strongest correlation ahead of the chirp, the extent of the above-threshold
+> band, and the strongest delayed correlation in each delay band after the peak.
+> Over the six:
+>
+> | delay after the peak | strongest correlation across the six |
+> |---|---|
+> | inside the band (0–0.40 ms) | 0.2947–0.6510 — the arrival itself |
+> | 5–10 ms | 0.085–0.137 |
+> | 10–20 ms | 0.069–0.102 |
+> | 20–40 ms | 0.037–0.089 |
+> | 40–80 ms | 0.093–0.112 |
+> | 80–160 ms | 0.097–0.121 |
+> | 160–320 ms | 0.109–0.141 |
+> | 320–640 ms | 0.125–0.145 |
+> | 640 ms–1 s | 0.101–0.166 |
+>
+> The above-threshold band around each chirp is **29–91 samples wide (0.6–1.9
+> ms)** and its last offset is at most 19 samples (0.40 ms) past the peak. Past
+> that band, nothing re-correlates above **0.166** at any delay out to a full
+> second, against a 0.25 accept threshold. Reverb is indistinguishable from the
+> floor by 5 ms; the slow rise at the long end is the payload's own weak
+> correlation against the chirp template, not the room. So no delayed arrival in
+> this corpus ever becomes a candidate, and 250 ms — three chirp lengths, 86 m of
+> extra path — is far more look-back than these recordings can justify needing.
+>
+> **What is still only empirical, at 250 ms and at 1 s alike.** Successive
+> windows abut, so there are seams, and a seam falling strictly inside an
+> above-threshold band splits it: the earlier window sees only the band's leading
+> edge, which on capture 001 clears the threshold on its own (0.2593 at 116384),
+> and locks on a shoulder — the same degradation the unaligned-advance trap above
+> produced. 12 000 divides 48 000, so every seam of the old bound is still a
+> seam; a shorter window cannot fix a split, only add four times as many places
+> one could occur. Measured: **no seam falls inside any of the six bands at
+> either bound**, and the closest approach is capture 005, whose band starts 609
+> samples (12.7 ms) after the seam at 96 000 — a seam both bounds share. With
+> bands ≤91 samples and seams every 12 000 the residual exposure is under 1% per
+> capture. Making it structural means windows that overlap by a chirp length
+> instead of abutting, which costs about a third of what this change bought;
+> that is a separate piece of work, not a hidden rider on this one.
 
 ## Why 25 sym/s cannot be tested against these captures
 

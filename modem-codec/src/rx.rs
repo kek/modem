@@ -3,7 +3,7 @@ use modem_core::phy::Phy;
 use modem_core::preamble::{SCAN_STRIDE, SYNC_WORD};
 use sha2::{Digest, Sha256};
 
-/// How far back a single preamble scan may reach, in seconds of audio.
+/// How far back a single preamble scan may reach, in milliseconds of audio.
 ///
 /// The scan takes the *strongest* correlation in the window it is given. That
 /// is the right rule for choosing between two arrivals of the same chirp — a
@@ -15,35 +15,77 @@ use sha2::{Digest, Sha256};
 /// it could have decoded in order to lock on a louder one later in the
 /// recording. Nobody chose that.
 ///
-/// One second, because:
+/// 250 ms, because:
 ///
-/// * it is more than twelve times the 80 ms chirp, so a candidate is still
-///   compared against everything that could plausibly be *the same chirp*
-///   arriving by another path. Sound covers 343 m in a second; a reflection a
-///   second late has taken a detour no room provides.
+/// * it is three times the 80 ms chirp, so a candidate is still compared
+///   against everything that could plausibly be *the same chirp* arriving by
+///   another path: sound covers 86 m in 250 ms, and a reflection that late has
+///   taken a detour no room provides.
+/// * the six real captures say the reverb tail needs nothing like that much.
+///   Measured at full resolution with
+///   `cargo run --release -p modem-codec --example preamble_probe -- captures`:
+///   the band of offsets around each chirp that clears the 0.25 accept
+///   threshold is 29–91 samples wide (0.6–1.9 ms), and the latest offset in it
+///   is 19 samples — 0.40 ms — past the peak. Past that band nothing in any of
+///   the six re-correlates above **0.166** at any delay out to a full second.
+///   The strongest delayed correlation, band by band across the six: 5–10 ms
+///   0.085–0.137, 10–20 ms 0.069–0.102, 20–40 ms 0.037–0.089, 40–80 ms
+///   0.093–0.112, 80–160 ms 0.097–0.121, 160–320 ms 0.109–0.141, 320–640 ms
+///   0.125–0.145, 640 ms–1 s 0.101–0.166. Reverb is indistinguishable from the
+///   floor by 5 ms; the slow *rise* at the long end is the payload's own weak
+///   correlation against the chirp template, not the room. So in these rooms a
+///   delayed arrival of the same chirp never becomes a candidate at all, and
+///   250 ms is already two orders of magnitude more look-back than the corpus
+///   can justify needing.
 /// * it is far below the frame period (13.9 s at 50 sym/s), so two consecutive
 ///   frames' preambles can never compete: the earlier is locked and decoded
 ///   before the later is ever scored.
-/// * it fixes the cost of one scan at 12 000 stride-4 windows however much
-///   audio is buffered, and — because successive scans partition the timeline —
-///   it removes the re-scan of the whole buffer that used to happen after every
+/// * it fixes the cost of one scan at 3 000 stride-4 windows however much audio
+///   is buffered, and — because successive scans partition the timeline — it
+///   removes the re-scan of the whole buffer that used to happen after every
 ///   frame. That, not the inner loop, is where `stream_roundtrip`'s 45 minutes
-///   went.
+///   went, and the window length is what is left of it: the scan searches its
+///   whole window for a maximum even when the chirp sits at offset 0, which it
+///   does for every frame after the first, so one scan costs one window
+///   regardless of where the preamble is.
 /// * it moves no lock on the six real captures: nothing before the chirp scores
-///   above the 0.25 accept threshold in any of them (the first window over
-///   threshold is 76 samples before the peak on capture 001 and within 12 on the
-///   other five — see docs/android-smoke-test.md).
+///   above the 0.25 accept threshold in any of them (the strongest correlation
+///   anywhere ahead of the chirp is 0.0764 on capture 003, 0.0144–0.0377 on the
+///   other five), and all six return the same offset *and* the same score as
+///   the 1 s bound and as an unbounded scan — 001 116460/0.2947, 002
+///   92113/0.5794, 003 91147/0.5918, 004 94573/0.6510, 005 96620/0.6130, 006
+///   93845/0.5914. Capture 001 is the one to watch: 0.2947 is only 0.045 clear
+///   of the threshold.
+///
+/// One thing this bound does *not* guarantee structurally, at 250 ms or at the
+/// 1 s it replaced. Successive windows partition the timeline, so there are
+/// seams, and a seam that falls strictly inside a chirp's above-threshold band
+/// splits it: the earlier window sees only the band's leading edge, which on
+/// capture 001 clears 0.25 on its own (0.2593 at 116384), and locks on a
+/// shoulder instead of the peak. 12 000 divides 48 000, so every seam of the
+/// old bound is still a seam — shortening the window cannot fix a split, only
+/// add places one could happen, and it adds four times as many. Measured: none
+/// of the six bands contains a seam at either bound, and the closest approach
+/// is capture 005, whose band begins 609 samples (12.7 ms) after the seam at
+/// 96 000 — a seam both bounds share. With bands ≤91 samples and seams every
+/// 12 000, the residual exposure is under 1% per capture. Removing it needs
+/// windows that overlap by a chirp length rather than abut, which costs a third
+/// of what this bound just bought and is a separate change.
 ///
 /// What the bound gives up: a chirp that starts late in a long buffer is still
 /// *found* — scans sweep forward one window at a time and retire each, so every
 /// offset is still examined — but a later, stronger chirp can no longer override
-/// an above-threshold one more than a second before it. When that earlier one is
+/// an above-threshold one more than `LOOK_BACK_MILLIS` before it. When that one is
 /// a false positive the receiver now spends the following frame's samples on
 /// garbage, which the sync word and RS+CRC reject, instead of skipping it. That
 /// is the deliberate trade: bounded, predictable work and a lock on the first
 /// acceptable arrival, against an unbounded comparison that preferred whatever
 /// was loudest in the last two minutes.
-pub const LOOK_BACK_SECONDS: usize = 1;
+///
+/// Expressed in milliseconds rather than seconds only so this can be a quarter
+/// of a second; `sample_rate * LOOK_BACK_MILLIS / 1_000` is exact at every rate
+/// the PHYs use.
+pub const LOOK_BACK_MILLIS: usize = 250;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameEvent {
@@ -69,15 +111,30 @@ pub struct Receiver<P: Phy> {
     /// waveform, and `Phy::preamble` hands out a fresh `Vec` every call, which
     /// `step` used to clone once per scan for nothing but its length.
     preamble_samples: usize,
-    /// `LOOK_BACK_SECONDS` converted to samples for this PHY's rate.
+    /// `LOOK_BACK_MILLIS` converted to samples for this PHY's rate.
     look_back: usize,
+    /// Every sample ever dropped from the front of `buffer`, summed: the
+    /// absolute index, in the stream the caller pushed, of `buffer[0]`.
+    consumed: usize,
+    /// One entry per preamble lock, `(offset, score)`, with the offset in the
+    /// caller's stream coordinates rather than the buffer's.
+    ///
+    /// Bookkeeping, not behaviour — nothing in `step` reads it. It exists
+    /// because the preamble gate for this receiver is *the per-capture lock
+    /// offset and score* (`docs/android-smoke-test.md`), and until this existed
+    /// there was no way to read either one out: the offset `detect_preamble`
+    /// returns is relative to a slice whose start has already moved, and the
+    /// score is discarded the moment it clears the threshold. The rank table is
+    /// not a substitute — it stayed byte-identical through a bug that moved
+    /// three of six locks onto correlation shoulders.
+    locks: Vec<(usize, f32)>,
 }
 
 impl<P: Phy> Receiver<P> {
     pub fn new(phy: P) -> Self {
         let payload_samples = phy.frame_data_samples(SYNC_WORD.len() + FRAME_LEN);
         let preamble_samples = phy.preamble().len();
-        let look_back = phy.sample_rate() as usize * LOOK_BACK_SECONDS;
+        let look_back = phy.sample_rate() as usize * LOOK_BACK_MILLIS / 1_000;
         Self {
             phy,
             state: State::Searching,
@@ -87,12 +144,30 @@ impl<P: Phy> Receiver<P> {
             payload_samples,
             preamble_samples,
             look_back,
+            consumed: 0,
+            locks: Vec::new(),
         }
     }
 
     /// The PHY this receiver demodulates with. See `Transmitter::phy`.
     pub fn phy(&self) -> &P {
         &self.phy
+    }
+
+    /// Every preamble this receiver has locked on, in order, as
+    /// `(offset, score)` — the offset counted from the first sample ever pushed,
+    /// so it can be compared against a figure measured on a whole recording.
+    /// See the `locks` field for why this is worth reading.
+    pub fn locks(&self) -> &[(usize, f32)] {
+        &self.locks
+    }
+
+    /// Drop `n` samples from the front of the buffer, keeping `consumed` — and
+    /// so the meaning of every offset in `locks` — correct. Every removal from
+    /// the front goes through here.
+    fn drop_front(&mut self, n: usize) {
+        self.buffer.drain(..n);
+        self.consumed += n;
     }
 
     pub fn push_samples(&mut self, samples: &[f32]) -> Vec<FrameEvent> {
@@ -106,7 +181,7 @@ impl<P: Phy> Receiver<P> {
         let max_keep = self.payload_samples * 4;
         if self.buffer.len() > max_keep {
             let drop = self.buffer.len() - max_keep;
-            self.buffer.drain(..drop);
+            self.drop_front(drop);
         }
         events
     }
@@ -138,7 +213,7 @@ impl<P: Phy> Receiver<P> {
                     // leading edge of the correlation ramp: detect_preamble
                     // searches all of `slice` for the maximum and only then
                     // returns — `slice` is now the bounded look-back window
-                    // rather than the whole buffer (see LOOK_BACK_SECONDS), so
+                    // rather than the whole buffer (see LOOK_BACK_MILLIS), so
                     // this is the peak of the window, and the window is where
                     // the earliest acceptable candidate lives. `slice` always
                     // extends `payload_samples`
@@ -154,8 +229,9 @@ impl<P: Phy> Receiver<P> {
                     // the window it lands in. The sync word + RS+CRC catch false
                     // positives that get past this.
                     if score > 0.25 {
+                        self.locks.push((self.consumed + off, score));
                         // Drop everything up to and including the preamble.
-                        self.buffer.drain(..off + tn);
+                        self.drop_front(off + tn);
                         self.state = State::AfterPreamble;
                         return true;
                     }
@@ -191,7 +267,7 @@ impl<P: Phy> Receiver<P> {
                     // audio rather than lose the grid's phase.
                     return false;
                 }
-                self.buffer.drain(..retire);
+                self.drop_front(retire);
                 true
             }
             State::AfterPreamble => {
@@ -199,6 +275,7 @@ impl<P: Phy> Receiver<P> {
                     return false;
                 }
                 let payload_slice: Vec<f32> = self.buffer.drain(..self.payload_samples).collect();
+                self.consumed += self.payload_samples;
                 self.state = State::Searching;
 
                 let raw = self.phy.demodulate_bytes(&payload_slice, SYNC_WORD.len() + FRAME_LEN);
@@ -295,7 +372,7 @@ mod tests {
         }
     }
 
-    /// The look-back bound (`LOOK_BACK_SECONDS`). A weaker but acceptable
+    /// The look-back bound (`LOOK_BACK_MILLIS`). A weaker but acceptable
     /// preamble further back must win over a stronger one that is beyond the
     /// bound — the receiver locks on the first acceptable arrival instead of
     /// scanning on for whatever is loudest in the whole buffer.
@@ -309,14 +386,14 @@ mod tests {
     #[test]
     fn does_not_look_back_past_the_bound() {
         let phy = FskPhy::audible();
-        let bound = phy.sample_rate() as usize * LOOK_BACK_SECONDS;
+        let bound = phy.sample_rate() as usize * LOOK_BACK_MILLIS / 1_000;
         let template = phy.preamble();
         let tx = Transmitter::new(FskPhy::audible(), false);
         let payload = b"the later, louder transmission";
         let signal = tx.encode(payload);
         let decoy_at = 2_000usize;
 
-        // --- beyond the bound: 1.5 s of gap, bound is 1 s ---
+        // --- beyond the bound: a gap of one and a half bounds ---
         let far = decoy_at + bound + bound / 2;
         let mut buf = pseudo_noise(far + signal.len() + 1_000, 0.30);
         plant_decoy(&mut buf, decoy_at, &template);
@@ -359,7 +436,7 @@ mod tests {
              cannot also decode: {events:?}"
         );
 
-        // --- inside the bound: 0.2 s of gap, both candidates in one window ---
+        // --- inside the bound: a fifth of one, both candidates in one window ---
         let near = decoy_at + bound / 5;
         let mut buf = pseudo_noise(near + signal.len() + 1_000, 0.30);
         plant_decoy(&mut buf, decoy_at, &template);
@@ -380,6 +457,41 @@ mod tests {
             })
             .expect("no StreamComplete event");
         assert_eq!(complete.as_slice(), payload.as_slice());
+    }
+
+    /// `locks()` reports in the caller's coordinates, not the buffer's, and the
+    /// answer does not depend on how the stream was chunked.
+    ///
+    /// This is the readout the preamble gate is stated against — per-capture
+    /// lock offset and score — so it has to survive the two things that move the
+    /// buffer under it: retiring a rejected window, and draining a frame. The
+    /// offset here is deliberately off the stride-4 grid, so a lock reported
+    /// from an unrefined coarse winner would be three samples out.
+    #[test]
+    fn reports_lock_offsets_in_stream_coordinates() {
+        let tx = Transmitter::new(FskPhy::audible(), false);
+        let signal = tx.encode(b"where did that preamble start?");
+        let lead = 5_001usize;
+
+        let mut buf = pseudo_noise(lead, 0.02);
+        buf.extend_from_slice(&signal);
+
+        let mut whole = Receiver::new(FskPhy::audible());
+        whole.push_samples(&buf);
+        assert_eq!(whole.locks().len(), 1, "one frame, one lock: {:?}", whole.locks());
+        let (off, score) = whole.locks()[0];
+        assert_eq!(off, lead, "lock should be reported at the chirp's true start");
+        assert!(score > 0.9, "clean signal should score near 1, got {score}");
+
+        let mut chunked = Receiver::new(FskPhy::audible());
+        for chunk in buf.chunks(4_800) {
+            chunked.push_samples(chunk);
+        }
+        assert_eq!(
+            chunked.locks(),
+            whole.locks(),
+            "chunking the same audio must not move the reported lock"
+        );
     }
 
     #[test]
