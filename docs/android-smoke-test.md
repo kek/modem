@@ -226,6 +226,34 @@ WAV.
 > before and after (`baseline` 3/6, `m` 4/6), which is expected — 3 samples is
 > 0.3% of a 960-sample symbol, far inside what the demodulator tolerates.
 
+> **Added 2026-07-31: the scan is now bounded, and that is a behaviour change.**
+> `Receiver::step` used to scan every stride-4 offset in whatever was buffered —
+> `buffer.len() - payload_samples` offsets, which is 126 s of audio when a
+> ten-frame file is pushed in one call, re-run whole after every frame. It now
+> scans at most `LOOK_BACK_SECONDS` (1 s, 12 000 windows) per scan and slides,
+> retiring the offsets it has rejected, so a stream is swept once instead of
+> once per frame. Measured on this corpus, the lock does not move: all six
+> captures return the same offset *and* the same score as the unbounded scan
+> (001 116460/0.2947, 002 92113/0.5794, 003 91147/0.5918, 004 94573/0.6510,
+> 005 96620/0.6130, 006 93845/0.5914), and the rank output is byte-identical.
+> The reason it cannot move here is measurable: the strongest correlation
+> anywhere *ahead* of the chirp is 0.0764 (capture 003; the other five are
+> 0.0144–0.0377), against a 0.25 accept threshold, so no earlier window can win.
+> What the bound gives up is the ability of a later, stronger chirp to override
+> an acceptable one more than a second earlier — deliberately, because at 13.9 s
+> per frame the unbounded comparison could skip a decodable frame for a louder
+> one further down the recording.
+>
+> One trap worth recording, because it is the same class of bug as the stride-4
+> one above: the slide must advance by a **multiple of the stride**.
+> `detect_preamble` strides from index 0 of the slice it is handed, so an
+> unaligned advance re-phases the grid and scores a different set of offsets.
+> Advancing by `bound + 1` instead moved three of the six locks off their peaks —
+> 001 116460/0.2947 → 116385/0.2697, 003 91147/0.5918 → 91136/0.3532, 005
+> 96620/0.6130 → 96637/0.4360 — which the rank output survived (same eight
+> outcomes) but which throws away a third of capture 001's margin over the
+> threshold for nothing.
+
 ## Why 25 sym/s cannot be tested against these captures
 
 Ranking the real corpus "at both rates" is not a thing that can be done, and a
@@ -427,7 +455,9 @@ cargo run --release -p modem-codec --example gen_sim_corpus -- captures/simulate
 cargo build --release && ./target/release/modem rank captures/simulated
 ```
 
-Use `--release`. The `stream_roundtrip` proptest takes tens of minutes in debug.
+Use `--release`. In debug the `stream_roundtrip` proptest used to take tens of
+minutes (2706 s when the preamble scan was unbounded, of a ~47-minute suite);
+with the bounded scan it is about 50 s, and the whole workspace suite about 80 s.
 
 ## What halving the symbol rate to 25 sym/s buys
 

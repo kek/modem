@@ -32,15 +32,31 @@ fn chirp(f0: f32, f1: f32, duration_s: f32) -> Vec<f32> {
 /// fine structure oscillates at the ~3.75 kHz centre frequency, so the best
 /// stride-4 grid point can sit up to `SCAN_STRIDE - 1` samples off true
 /// alignment and score well below the real peak. Hence `refine_peak`.
-const SCAN_STRIDE: usize = 4;
+///
+/// Public because the grid has a *phase*, and a caller that slides a window
+/// across a stream has to keep it: `detect_preamble` strides from index 0 of
+/// whatever slice it is handed, so a caller that advances by something other
+/// than a multiple of `SCAN_STRIDE` re-phases the grid and scores a different
+/// set of offsets. Measured on the six captures in `captures/`: advancing by
+/// `bound + 1` instead of a multiple of the stride moved the lock on three of
+/// the six (capture 001: 116460 at 0.2947 becomes 116385 at 0.2697 — a peak
+/// traded for a shoulder, and a third of the margin over the 0.25 accept
+/// threshold given away for nothing). `Receiver::step` advances in whole
+/// strides for that reason.
+pub const SCAN_STRIDE: usize = 4;
 
 /// Normalised correlation of `template` against `haystack[i..i + template.len()]`.
 /// Amplitude-invariant: a quiet but well-shaped copy scores as high as a loud one.
+///
+/// The loop zips two slices rather than indexing `haystack[i + k]`, which is
+/// the same arithmetic in the same order — so every score is bit-identical to
+/// the indexed version — with one bounds check instead of `template.len()` of
+/// them. That matters because the tests run this in a debug build, where the
+/// per-element check is a large fraction of the cost of the whole scan.
 fn score_at(haystack: &[f32], template: &[f32], i: usize, template_energy: f32) -> f32 {
     let mut corr = 0f32;
     let mut win_energy = 0f32;
-    for (k, t) in template.iter().enumerate() {
-        let x = haystack[i + k];
+    for (x, t) in haystack[i..i + template.len()].iter().zip(template.iter()) {
         corr += x * t;
         win_energy += x * x;
     }
