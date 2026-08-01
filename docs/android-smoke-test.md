@@ -301,7 +301,9 @@ WAV.
 > this corpus ever becomes a candidate, and 250 ms — three chirp lengths, 86 m of
 > extra path — is far more look-back than these recordings can justify needing.
 >
-> **What is still only empirical, at 250 ms and at 1 s alike.** Successive
+> **What is still only empirical, at 250 ms and at 1 s alike** — closed on
+> 2026-08-01, see the note below, including why the remedy named here is not the
+> one that worked. Successive
 > windows abut, so there are seams, and a seam falling strictly inside an
 > above-threshold band splits it: the earlier window sees only the band's leading
 > edge, which on capture 001 clears the threshold on its own (0.2593 at 116384),
@@ -315,6 +317,74 @@ WAV.
 > capture. Making it structural means windows that overlap by a chirp length
 > instead of abutting, which costs about a third of what this change bought;
 > that is a separate piece of work, not a hidden rider on this one.
+
+> **Added 2026-08-01: the seam is structural now, and this corpus cannot see the
+> difference.** `Receiver::step` no longer locks on an above-threshold candidate
+> that sits within one chirp length (3 840 samples) of the trailing edge of a
+> look-back window. It retires up to that candidate — rounded *down* to a whole
+> `SCAN_STRIDE`, for the reason the unaligned-advance trap above gives — and
+> scans again, so the whole band and its peak are weighed in one window. The
+> reach is a chirp length because past `tn` of shift the template and the chirp
+> do not overlap at all, so no band can start more than a chirp length before its
+> peak; that is why the guarantee does not depend on these six recordings, whose
+> bands are only 29–91 samples wide.
+>
+> **The gate cannot prove the fix, and saying so is the point.** No seam falls
+> inside any of the six bands, so all six locks are *expected* to be
+> bit-identical before and after, and identical locks only prove nothing
+> regressed. They are, at full resolution and with the same scores: 001
+> 116460/0.2947, 002 92113/0.5794, 003 91147/0.5918, 004 94573/0.6510, 005
+> 96620/0.6130, 006 93845/0.5914, decode outcomes unchanged
+> (`rs_fail`/`crc_fail`/`ok`/`ok`/`crc_fail`/`ok`). Three of the six do exercise
+> the new path — 001, 004 and 006 lock 3 540, 1 427 and 2 155 samples before a
+> seam, all inside a chirp length, so each is deferred once and re-locks on the
+> same offset and the same score. That is the deferral being lossless on real
+> audio, which is the most this corpus can say.
+>
+> **What proves it is a synthetic bite test**,
+> `a_seam_inside_the_band_does_not_cost_the_peak` in `modem-codec/src/rx.rs`,
+> which reproduces capture 001's band
+> shape across a seam: a weak smeared arrival at 11 972, a stronger one at
+> 12 060, the seam at 12 000 between them, a whole frame buffered behind both so
+> the trailing edge is the look-back bound and not the end of the audio. On trunk
+> the first window sees only the leading edge, finds 0.3673 there, and locks —
+> 88 samples before the chirp, with the 0.8646 peak one window away. With the
+> deferral it locks on the peak.
+>
+> **Two variants of "windows that overlap by a chirp length" were tried, and the
+> one the note above named does not work.** Retiring `bounded_end + 1 - tn` so
+> successive windows re-scan the last chirp length leaves the bite test failing:
+> the premature lock happens in the window that first sees the leading edge, and
+> the later window that would have seen the whole band is never reached, because
+> the receiver has already locked. Handing the detector a slice that reaches `tn`
+> *past* the trailing edge does work, but it widens every comparison from 250 ms
+> to 330 ms — the bound chosen deliberately one note above — and pays for it on
+> every window whether or not anything is near an edge.
+>
+> **Count the correlations rather than the seconds; the seconds on this machine
+> cannot resolve it.** Looking ahead scans 3 961 stride-4 offsets per window
+> instead of 3 001, a permanent +32%. The deferral scans one extra partial window
+> per candidate that clears the threshold within a chirp length of a seam, and
+> nothing otherwise: **the whole workspace suite defers twice**, once in the bite
+> test that exists to force it and once in
+> `back_to_back_transmissions_decode_cleanly`, which passes unchanged. The six
+> captures defer three times, all lossless. Timings, for the record and with
+> their noise: `cargo test --workspace` 47.4 s / 42.9 s on trunk against 46.1 s /
+> 42.3 s with the deferral; `cargo test --test stream_roundtrip` 21.49 s trunk,
+> 21.17 s retiring less, 21.36 s looking ahead, 14.16 s and 20.02 s on two
+> consecutive runs of the *same* deferral binary. That last pair is the point —
+> this machine had other work on it, and a 40% spread on identical code means no
+> timing here can price a 32% change in correlation work. The "about a third of
+> what this bought" the note above priced the fix at was never measured either.
+>
+> **One hazard is left standing on purpose.** When a window's trailing edge is
+> the end of buffered audio rather than a look-back seam, a candidate near it can
+> still be a split-band shoulder. Deferring there would not rescan, it would
+> *wait*: up to 80 ms of added latency per near-edge candidate on a live stream,
+> and on a whole-file push — no more audio coming, no flush — a dropped frame
+> whenever the preamble sits within a chirp length of the last scannable offset.
+> A live loss to close a latent risk is the wrong trade. The exposure is the last
+> 3 840 offsets of whatever has been pushed, and it closes as the buffer fills.
 
 ## Why 25 sym/s cannot be tested against these captures
 
