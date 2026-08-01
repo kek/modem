@@ -57,20 +57,32 @@ use sha2::{Digest, Sha256};
 ///   93845/0.5914. Capture 001 is the one to watch: 0.2947 is only 0.045 clear
 ///   of the threshold.
 ///
-/// One thing this bound does *not* guarantee structurally, at 250 ms or at the
-/// 1 s it replaced. Successive windows partition the timeline, so there are
-/// seams, and a seam that falls strictly inside a chirp's above-threshold band
-/// splits it: the earlier window sees only the band's leading edge, which on
-/// capture 001 clears 0.25 on its own (0.2593 at 116384), and locks on a
-/// shoulder instead of the peak. 12 000 divides 48 000, so every seam of the
-/// old bound is still a seam — shortening the window cannot fix a split, only
-/// add places one could happen, and it adds four times as many. Measured: none
-/// of the six bands contains a seam at either bound, and the closest approach
-/// is capture 005, whose band begins 609 samples (12.7 ms) after the seam at
-/// 96 000 — a seam both bounds share. With bands ≤91 samples and seams every
-/// 12 000, the residual exposure is under 1% per capture. Removing it needs
-/// windows that overlap by a chirp length rather than abut, which costs a third
-/// of what this bound just bought and is a separate change.
+/// The seam this bound creates is no longer a hazard, and closing it cost
+/// nothing measurable — not the third of this saving the note here used to
+/// price it at, and not by the remedy that note named, which turned out not to
+/// work at all. Successive windows
+/// still partition the timeline, and a seam strictly inside a chirp's
+/// above-threshold band still splits it — but `defer_to_next_window` refuses to
+/// lock on a candidate within one chirp length of the trailing edge of a
+/// look-back window, retiring up to it and rescanning instead, so the band and
+/// its peak are examined together. The reach is a chirp length because past
+/// `tn` of shift the template and the chirp do not overlap at all, which makes
+/// the guarantee independent of these six recordings rather than a property of
+/// their 29–91-sample bands. What it does *not* cover, deliberately, is a
+/// trailing edge that is the end of buffered audio: see that method.
+///
+/// It was latent when it was closed, not live, and that is worth recording. No
+/// seam falls inside any of the six bands at this bound or the 1 s it replaced;
+/// the closest approach is capture 005, whose band begins 609 samples (12.7 ms)
+/// after the seam at 96 000 — a seam both bounds share — and with bands ≤91
+/// samples and seams every 12 000 the exposure was under 1% per capture. The
+/// deferral nevertheless fires on three of the six, because a lock within 3 840
+/// samples of a seam is deferred whether or not its band actually crosses one:
+/// 001 (3 540 from the seam at 120 000), 004 (1 427 from 96 000) and 006
+/// (2 155 from 96 000) each cost one rescan and re-lock on the same offset and
+/// the same score. That is the price, and it is why the shape of the fix is a
+/// conditional rescan rather than an overlap: a window that finds nothing
+/// acceptable retires whole, as before, so the common case pays nothing.
 ///
 /// What the bound gives up: a chirp that starts late in a long buffer is still
 /// *found* — scans sweep forward one window at a time and retire each, so every
@@ -186,6 +198,131 @@ impl<P: Phy> Receiver<P> {
         events
     }
 
+    /// Whether an accepted candidate at `off` should be *deferred* to the next
+    /// window instead of locked on, and if so how many samples to retire.
+    /// `Some(retire)` means: drop `retire` samples and scan again, so that the
+    /// candidate's whole correlation band — and therefore its true peak — is
+    /// inside one window. `None` means lock.
+    ///
+    /// Successive windows partition the timeline, so they have seams, and a seam
+    /// strictly inside a chirp's above-threshold band splits it: the earlier
+    /// window sees only the band's leading edge. That is only harmful when the
+    /// leading edge clears the accept threshold on its own, because then the
+    /// receiver locks on a shoulder and every symbol boundary downstream is
+    /// measured from an offset that is not where the chirp starts. When nothing
+    /// in a window clears the threshold, retiring the whole window is lossless —
+    /// the next window contains the peak and locks on it correctly. So the fix is
+    /// not to overlap every window; it is to defer exactly the locks that could
+    /// be split-band shoulders, which costs a partial rescan only when a
+    /// candidate clears the threshold near an edge.
+    ///
+    /// **The reach is one chirp length, and that is what makes this structural.**
+    /// Shift the template more than `tn` from the chirp and the two do not
+    /// overlap at all, so a band cannot start more than `tn` before its peak.
+    /// A candidate at `off` that is the leading edge of a band whose peak `p`
+    /// lies beyond the window therefore satisfies both `p <= off + tn` and
+    /// `p > bounded_end`, so `bounded_end - off < tn`. Contrapositive: a
+    /// candidate `tn` or more before the trailing edge cannot be a shoulder of an
+    /// out-of-window peak — if it were, the peak would be inside this window, and
+    /// the peak outscores the shoulder, so the peak is what the scan would have
+    /// returned. The guarantee holds for any recording, not just the six in
+    /// `captures/`, whose bands happen to be 29–91 samples wide.
+    ///
+    /// Two conditions, and the second is the reason this terminates.
+    ///
+    /// * `bounded_end - off < tn` — the candidate is within reach of the edge.
+    /// * `off + tn <= search_end` — the furthest position the peak could occupy
+    ///   is already scannable, i.e. a whole frame is buffered behind it. This
+    ///   confines the deferral to look-back seams: if `bounded_end == search_end`
+    ///   (the trailing edge is the end of buffered audio) the two conditions
+    ///   contradict each other, so it never fires there. See below.
+    ///
+    /// Termination. Because it only fires when `bounded_end` is the look-back
+    /// bound, `off > look_back - tn`, and `look_back` (250 ms) exceeds `tn`
+    /// (80 ms) at every sample rate, so `retire >= look_back - tn > 0`: every
+    /// deferral retires at least 8 160 samples at 48 kHz — two thirds of a full
+    /// window advance — and the scan cannot stand still. Nor can the same
+    /// candidate be deferred twice: the rescanned window reaches at least `tn`
+    /// past it, which is the first condition failing.
+    ///
+    /// `retire` rounds **down** to a whole `SCAN_STRIDE`, for the reason `step`'s
+    /// retire comment and `SCAN_STRIDE`'s own give: an advance that is not a
+    /// stride multiple re-phases the coarse grid onto a different set of offsets,
+    /// which is the bug that moved three of the six captures' locks onto
+    /// shoulders. Rounding down keeps the candidate inside the next window.
+    ///
+    /// **Why not overlapping windows, which is what the note above used to
+    /// promise.** "Windows that overlap by a chirp length instead of abutting"
+    /// turns out to mean two different changes, and both were tried against
+    /// `a_seam_inside_the_band_does_not_cost_the_peak`.
+    ///
+    /// * *Advance less* — retire `bounded_end + 1 - tn` instead of
+    ///   `bounded_end + 1`, so successive windows re-scan the last chirp length.
+    ///   **This does not fix anything, and the test proves it.** The premature
+    ///   lock happens in the window that first sees the leading edge; overlap
+    ///   only means a *later* window would have seen the whole band, and that
+    ///   window is never reached, because the receiver has already locked and
+    ///   moved on. The lock decision, not the window geometry, is what has to
+    ///   change.
+    /// * *Look ahead* — keep the advance at `bounded_end + 1` but hand
+    ///   `detect_preamble` a slice reaching `tn` further, so every window sees a
+    ///   chirp length past its own trailing edge. This does work. It also widens
+    ///   the comparison range every scan uses from 250 ms to 330 ms, which is the
+    ///   bound `LOOK_BACK_MILLIS` was deliberately chosen to be, and it pays 32%
+    ///   more correlation on every window whether or not anything is near an
+    ///   edge.
+    ///
+    /// So the deferral is the cheaper of the two that work, and it leaves the
+    /// bound alone. Cheaper in *correlations*, which is the figure worth quoting:
+    /// looking ahead scans 3 961 offsets per window instead of 3 001, forever,
+    /// while the deferral scans one extra partial window per candidate that clears
+    /// the threshold near a seam and nothing at all otherwise — the whole
+    /// workspace suite defers twice, once in the test above and once in
+    /// `back_to_back_transmissions_decode_cleanly`, which passes either way. The
+    /// wall clock cannot resolve any of it on the machine that measured it:
+    /// `cargo test --test stream_roundtrip` gave 21.49 s on trunk, 21.17 s
+    /// advancing less, 21.36 s looking ahead — and 14.16 s then 20.02 s on two
+    /// consecutive runs of the *same* deferral binary. The "about a third of what
+    /// this bought" that the note on `LOOK_BACK_MILLIS` priced this work at was
+    /// arithmetic rather than a measurement, and it was arithmetic about the
+    /// variant that does not work.
+    ///
+    /// **What this deliberately does not cover.** When the window's trailing edge
+    /// is the end of buffered audio rather than a look-back seam, a candidate
+    /// near it can still be a split-band shoulder — but there the peak is not in
+    /// the next window, it is *not yet buffered*, so deferring means waiting for
+    /// up to a chirp length more audio. That trades a latent misalignment for a
+    /// live cost: 80 ms of added latency for every near-edge candidate on a
+    /// stream, and on a whole-file push — where no more audio is coming and there
+    /// is no flush — a dropped frame whenever the preamble sits within `tn` of
+    /// the last scannable offset. Not worth it. The residual exposure is the last
+    /// `tn` offsets of whatever has been pushed so far, and it shrinks to nothing
+    /// as the buffer fills.
+    fn defer_to_next_window(
+        &self,
+        off: usize,
+        bounded_end: usize,
+        search_end: usize,
+    ) -> Option<usize> {
+        let tn = self.preamble_samples;
+        debug_assert!(
+            off <= bounded_end,
+            "the scan slice ends at bounded_end + tn, so no offset past \
+             bounded_end can be returned: off={off} bounded_end={bounded_end}"
+        );
+        if bounded_end - off >= tn || off + tn > search_end {
+            return None;
+        }
+        let retire = (off / SCAN_STRIDE) * SCAN_STRIDE;
+        debug_assert!(
+            retire > 0,
+            "a deferral must make progress: off={off} bounded_end={bounded_end} \
+             search_end={search_end} look_back={} tn={tn}",
+            self.look_back
+        );
+        (retire > 0).then_some(retire)
+    }
+
     fn step(&mut self, events: &mut Vec<FrameEvent>) -> bool {
         match self.state {
             State::Searching => {
@@ -226,9 +363,24 @@ impl<P: Phy> Receiver<P> {
                     // exactly on the peak. It still does with the bound in
                     // place, because in those recordings nothing ahead of the
                     // chirp clears 0.25, so the chirp's own peak is the peak of
-                    // the window it lands in. The sync word + RS+CRC catch false
+                    // the window it lands in. That last clause used to be a fact
+                    // about these six recordings; `defer_to_next_window` below
+                    // makes it hold whatever is recorded, by refusing to lock
+                    // where a band could be split across the window's trailing
+                    // edge. The sync word + RS+CRC catch false
                     // positives that get past this.
                     if score > 0.25 {
+                        // Before locking: is this candidate close enough to the
+                        // window's trailing edge that it could be the *leading
+                        // edge* of a band whose peak is on the other side of a
+                        // seam? If so, retire up to it and rescan rather than
+                        // lock, so the next window holds the whole band. See
+                        // `defer_to_next_window`.
+                        if let Some(retire) = self.defer_to_next_window(off, bounded_end, search_end)
+                        {
+                            self.drop_front(retire);
+                            return true;
+                        }
                         self.locks.push((self.consumed + off, score));
                         // Drop everything up to and including the preamble.
                         self.drop_front(off + tn);
@@ -357,12 +509,20 @@ mod tests {
             .collect()
     }
 
+    /// The chirp, smeared into whatever is already in `buf`, at an arbitrary
+    /// amplitude. Amplitude is not what holds a smeared arrival's score down —
+    /// the correlation is amplitude-invariant — the surrounding noise is; this
+    /// is the knob for how much of the window's energy is chirp-shaped.
+    fn plant_smeared(buf: &mut [f32], at: usize, template: &[f32], amp: f32) {
+        for (k, t) in template.iter().enumerate() {
+            buf[at + k] += t * amp;
+        }
+    }
+
     /// A decoy: the chirp, smeared into noise. Scores above the 0.25 accept
     /// threshold, well below a clean transmission.
     fn plant_decoy(buf: &mut [f32], at: usize, template: &[f32]) {
-        for (k, t) in template.iter().enumerate() {
-            buf[at + k] += t * 0.55;
-        }
+        plant_smeared(buf, at, template, 0.55);
     }
 
     /// Plant a real transmission on a near-silent background.
@@ -457,6 +617,91 @@ mod tests {
             })
             .expect("no StreamComplete event");
         assert_eq!(complete.as_slice(), payload.as_slice());
+    }
+
+    /// A window seam falling strictly inside an above-threshold correlation band
+    /// must not cost the peak.
+    ///
+    /// Synthetic on purpose, and it has to be: no seam falls inside any of the
+    /// six real captures' bands, so the corpus cannot fail this test and cannot
+    /// prove it either. What the corpus does supply is the *shape* — capture
+    /// 001's band runs from 90 samples ahead of its peak to 1 past it, and its
+    /// leading edge clears the 0.25 accept threshold on its own (0.2593 at
+    /// 116384 against 0.2947 at 116460). This reproduces that shape across a
+    /// seam: a weak smeared arrival before the seam, the stronger one after it.
+    ///
+    /// With windows that abut, the earlier window sees only the leading edge,
+    /// finds it acceptable, and locks — every symbol boundary of the frame is
+    /// then measured from an offset that is not where the chirp starts. Measured:
+    /// before `defer_to_next_window` existed this locked at 11 972 on a score of
+    /// 0.3673, 88 samples before the chirp, with the 0.8646 peak at 12 060 one
+    /// window away.
+    ///
+    /// The buffer is deliberately long enough that a whole frame sits behind
+    /// every offset either window scores, so the first window's trailing edge is
+    /// the look-back seam and not the end of the audio. Those are different
+    /// hazards with different answers — see `defer_to_next_window`.
+    #[test]
+    fn a_seam_inside_the_band_does_not_cost_the_peak() {
+        let phy = FskPhy::audible();
+        let bound = phy.sample_rate() as usize * LOOK_BACK_MILLIS / 1_000;
+        let template = phy.preamble();
+        let tn = template.len();
+        // One frame's worth of audio, so the receiver has a whole frame buffered
+        // behind every offset it scores and the trailing edge of the first
+        // window is the look-back seam rather than the end of the buffer.
+        let frame_samples = Transmitter::new(FskPhy::audible(), false).encode(b"one frame").len();
+
+        // Straddle the seam: the peak past it, the leading edge before it, both
+        // on the stride-4 grid so this test is about the seam and not about
+        // `refine_peak`'s reach.
+        let peak_at = bound + 60;
+        let shoulder_at = bound - 28;
+        assert!(shoulder_at < bound && bound < peak_at, "the seam must split the band");
+
+        let mut buf = pseudo_noise(peak_at + tn + frame_samples + 2_000, 0.30);
+        plant_smeared(&mut buf, shoulder_at, &template, 0.42);
+        plant_smeared(&mut buf, peak_at, &template, 1.00);
+
+        // What the first window can see: exactly the offsets 0..=bound, which is
+        // the slice `step` hands to `detect_preamble`. For this test to mean
+        // anything that leading edge must clear the accept threshold on its own
+        // and still lose to the peak.
+        let (edge_off, edge_score) = phy
+            .detect_preamble(&buf[..bound + tn])
+            .expect("leading edge detectable inside the first window");
+        let (peak_off, peak_score) = phy.detect_preamble(&buf).expect("peak detectable");
+        assert!(
+            edge_off <= bound,
+            "the first window cannot see past {bound}, got {edge_off}"
+        );
+        assert!(
+            edge_score > 0.25,
+            "the sub-seam leading edge must clear the 0.25 accept threshold for \
+             this test to bite, got {edge_score} at {edge_off}"
+        );
+        assert!(
+            (peak_off as i64 - peak_at as i64).abs() <= 3 && peak_score > edge_score,
+            "the peak must be the later arrival at {peak_at} and beat the edge \
+             {edge_score:.4}, got {peak_score:.4} at {peak_off}"
+        );
+
+        let mut rx = Receiver::new(FskPhy::audible());
+        rx.push_samples(&buf);
+        assert_eq!(rx.locks().len(), 1, "one arrival, one lock: {:?}", rx.locks());
+        let (off, score) = rx.locks()[0];
+        assert!(
+            (off as i64 - peak_at as i64).abs() <= 3,
+            "locked on the band's leading edge at {off} (score {score:.4}) because \
+             the seam at {bound} split the band, instead of the peak at {peak_at} \
+             ({peak_score:.4}); windows that abut lose the peak whenever a band \
+             crosses a seam"
+        );
+        assert!(
+            score > edge_score,
+            "the lock's score {score:.4} should be the peak's, not the edge's \
+             {edge_score:.4}"
+        );
     }
 
     /// `locks()` reports in the caller's coordinates, not the buffer's, and the
